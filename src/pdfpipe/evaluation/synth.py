@@ -385,7 +385,14 @@ def _scan_pdf_with_layer(source: Path, target: Path, rng: random.Random, conditi
     document.close()
 
 
-VARIANTS = ["shipping_discount", "split_gst", "credit_note", "no_table", "german", "french"]
+VARIANTS = ["shipping_discount", "split_gst", "credit_note", "no_table", "german", "french", "dutch", "photo"]
+# Dutch and photos can't be read by the rules alone. They exist to measure the language model, so they are
+# left out of the default variants run.
+MODEL_VARIANTS = ["dutch", "photo"]
+_DUTCH_MONTHS = [
+    "januari", "februari", "maart", "april", "mei", "juni",
+    "juli", "augustus", "september", "oktober", "november", "december",
+]  # fmt: skip
 
 _GERMAN_MONTHS = [
     "Januar", "Februar", "März", "April", "Mai", "Juni",
@@ -442,6 +449,21 @@ _LOCALES: dict[str, dict[str, Any]] = {
         "decimal": ",",
         "months": _FRENCH_MONTHS,
     },
+    "dutch": {
+        "title": "Factuur",
+        "number": "Factuurnummer",
+        "date": "Factuurdatum",
+        "due": "Vervaldatum",
+        "bill": "Factuur aan",
+        "currency": "Valuta",
+        "vendor": "Leverancier",
+        "headers": ["Omschrijving", "Aantal", "Prijs per stuk", "Bedrag"],
+        "subtotal": "Subtotaal",
+        "tax": "BTW",
+        "total": "Totaalbedrag",
+        "decimal": ",",
+        "months": _DUTCH_MONTHS,
+    },
 }
 
 
@@ -460,7 +482,7 @@ def _locale_date(day: date, locale: dict[str, Any]) -> str:
 
 def _build_variant(invoice: Invoice, variant: str, path: Path, extras: dict[str, Any]) -> None:
     """A digital invoice whose totals, wording or layout differ from the standard one."""
-    locale = _LOCALES[variant if variant in ("german", "french") else "english"]
+    locale = _LOCALES[variant if variant in ("german", "french", "dutch") else "english"]
     styles = getSampleStyleSheet()
     sign = -1 if variant == "credit_note" else 1
 
@@ -557,7 +579,7 @@ def make_variant_case(variant: str, scan: bool, seed: int, folder: Path) -> Case
         invoice.tax = round(2 * half, 2)
         invoice.grand_total = round(subtotal + 2 * half, 2)
         truth_fields.update(cgst=half, sgst=half)
-    if variant in ("german", "french"):
+    if variant in ("german", "french", "dutch"):
         invoice.currency = "EUR"
 
     invoice.printed_total = invoice.grand_total
@@ -567,7 +589,10 @@ def make_variant_case(variant: str, scan: bool, seed: int, folder: Path) -> Case
     if scan:
         clean = folder / f"{name}.clean.tmp.pdf"
         _build_variant(invoice, variant, clean, extras)
-        _scan_pdf(clean, pdf, rng, "scan_light")
+        if variant == "photo":
+            _photo_pdf(clean, pdf, rng)
+        else:
+            _scan_pdf(clean, pdf, rng, "scan_light")
         clean.unlink()
     else:
         _build_variant(invoice, variant, pdf, extras)
@@ -599,14 +624,59 @@ def make_variant_case(variant: str, scan: bool, seed: int, folder: Path) -> Case
     return case
 
 
+def _photograph(image: np.ndarray, rng: random.Random) -> np.ndarray:
+    """A page photographed on a desk: tilted and slightly in perspective, unevenly lit, a little blurred."""
+    height, width = image.shape[:2]
+    source = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+    margins = [rng.uniform(0.01, 0.04) for _ in range(4)]
+    target = np.array(
+        [
+            [width * margins[0], height * margins[1]],
+            [width * (1 - margins[2]), height * margins[3]],
+            [width * (1 - margins[0]), height * (1 - margins[2])],
+            [width * margins[1], height * (1 - margins[3])],
+        ],
+        dtype=np.float32,
+    )
+    warped = cv2.warpPerspective(
+        image, cv2.getPerspectiveTransform(source, target), (width, height), borderValue=(70, 80, 90)
+    )
+    # Light falls off from one side, as it does with a lamp at an angle.
+    ramp = np.linspace(rng.uniform(0.62, 0.8), 1.0, width, dtype=np.float32)[None, :, None]
+    lit = np.clip(warped.astype(np.float32) * ramp, 0, 255)
+    blurred = cv2.GaussianBlur(lit, (5, 5), 0)
+    noisy = blurred + np.random.default_rng(rng.randint(0, 2**31 - 1)).normal(0, 6.0, blurred.shape)
+    photo: np.ndarray = np.clip(noisy, 0, 255).astype(np.uint8)
+    return photo
+
+
+def _photo_pdf(source: Path, target: Path, rng: random.Random) -> None:
+    """Turns a digital PDF into an image-only PDF that looks like a phone photo of the page."""
+    document = pdfium.PdfDocument(str(source))
+    output = canvas.Canvas(str(target))
+    for index in range(len(document)):
+        page = document[index]
+        width, height = page.get_size()
+        image = _photograph(page.render(scale=170 / 72).to_numpy()[:, :, :3].copy(), rng)
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 45])
+        if not ok:
+            raise RuntimeError("could not encode the test image")
+        output.setPageSize((width, height))
+        output.drawImage(ImageReader(io.BytesIO(encoded.tobytes())), 0, 0, width=width, height=height)
+        output.showPage()
+    output.save()
+    document.close()
+
+
 def make_variant_set(
     folder: Path, seeds: int = 1, variants: list[str] | None = None, first_seed: int = 0
 ) -> list[Case]:
     folder.mkdir(parents=True, exist_ok=True)
+    chosen = variants or [name for name in VARIANTS if name not in MODEL_VARIANTS]
     return [
         make_variant_case(variant, scan, seed, folder)
-        for variant in (variants or VARIANTS)
-        for scan in (False, True)
+        for variant in chosen
+        for scan in ((True,) if variant == "photo" else (False, True))
         for seed in range(first_seed, first_seed + seeds)
     ]
 

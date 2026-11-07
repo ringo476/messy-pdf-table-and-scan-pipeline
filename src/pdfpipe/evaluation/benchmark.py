@@ -16,6 +16,7 @@ from typing import Any
 
 from ..config import Settings
 from ..engines import Engines
+from ..fields.llm import build_resolver
 from ..models import DocumentResult
 from ..process import process_pdf
 from .synth import CONDITIONS, STYLES, VARIANTS, Case, make_benchmark_set, make_variant_set
@@ -90,6 +91,10 @@ class Tally:
     errors: int = 0
     fields_recovered: int = 0  # Fields the second pass fixed by reading the line again.
     recovered_wrong: int = 0  # Of those, how many ended up with a wrong value.
+    llm_calls: int = 0
+    llm_cost: float = 0.0
+    filled_by_llm: int = 0  # Fields the language model filled in, and the checks accepted.
+    llm_wrong: int = 0  # Of those, how many ended up wrong.
 
     def row(self) -> dict[str, Any]:
         precision = self.matched / self.found if self.found else 0.0
@@ -111,6 +116,10 @@ class Tally:
             "crashes": self.errors,
             "fields_fixed_by_second_pass": self.fields_recovered,
             "second_pass_wrong": self.recovered_wrong,
+            "model_calls": self.llm_calls,
+            "model_cost_usd": round(self.llm_cost, 4),
+            "fields_filled_by_model": self.filled_by_llm,
+            "model_filled_wrong": self.llm_wrong,
         }
 
 
@@ -134,6 +143,8 @@ def score_case(case: Case, result: DocumentResult, tally: Tally, failures: list[
     tally.pages += result.page_count
     tally.seconds.append(result.seconds / max(1, result.page_count))
     tally.docs_accepted += result.status == "accepted"
+    tally.llm_calls += result.llm.calls
+    tally.llm_cost += result.llm.estimated_cost_usd
     if truth["must_review"]:
         tally.must_review_docs += 1
         if result.status == "accepted":
@@ -151,6 +162,9 @@ def score_case(case: Case, result: DocumentResult, tally: Tally, failures: list[
         if value.recovery:
             tally.fields_recovered += 1
             tally.recovered_wrong += not correct
+        if value.source == "llm" and not value.needs_review:
+            tally.filled_by_llm += 1
+            tally.llm_wrong += not correct
         # An empty value that is accepted is only right if nothing should be there, like a missing item table.
         accepted = not value.needs_review and (value.value not in (None, "", []) or want in (None, []))
         tally.fields_accepted += accepted
@@ -191,8 +205,15 @@ def run(
     conditions: list[str] | None,
     first_seed: int = 0,
     variants: list[str] | None = None,
+    use_llm: bool = False,
 ) -> dict[str, Any]:
-    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    # With the language model on, the key is read from .env. Nothing is printed or written about it.
+    settings = (
+        Settings(_env_file=".env", llm_enabled=True) if use_llm else Settings(_env_file=None)  # type: ignore[call-arg]
+    )
+    resolver = build_resolver(settings) if use_llm else None
+    if use_llm and resolver is None:
+        raise SystemExit("The language model is on, but there is no key. Set PDFPIPE_OPENAI_API_KEY in .env.")
     engines = Engines(settings)
     engines.warm_up()
     if variants is not None:
@@ -209,7 +230,7 @@ def run(
     started = time.perf_counter()
     for case in cases:
         try:
-            result = process_pdf(case.pdf, settings, engines, folder / "output" / case.name)
+            result = process_pdf(case.pdf, settings, engines, folder / "output" / case.name, resolver)
         except Exception as error:  # A crash is a measured failure, and the run must continue.
             overall.errors += 1
             by_condition[case.condition].errors += 1
@@ -242,8 +263,13 @@ def main() -> None:
         choices=VARIANTS,
         help="run the invoice variants (extra charges, split GST, credit notes, no table, other languages) instead",
     )
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="turn the language model on, using the key in .env. This sends data to the provider and costs money.",
+    )
     args = parser.parse_args()
-    report = run(args.out, args.seeds, args.styles, args.conditions, args.first_seed, args.variants)
+    report = run(args.out, args.seeds, args.styles, args.conditions, args.first_seed, args.variants, args.llm)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({key: report[key] for key in ("total_seconds", "overall", "by_condition", "by_style")}, indent=2))

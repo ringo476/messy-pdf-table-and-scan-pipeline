@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from .. import __version__
 from ..config import Settings
 from ..fields.checks import INVOICE_ID, expected_totals
-from ..fields.llm import ClaudeResolver
+from ..fields.readers import AnthropicReader, Reader, build_reader
 from ..fields.values import parse_date, parse_money
 from ..pipeline.intake import RejectedFile
 from . import ask, auth, db
@@ -80,7 +80,10 @@ class LoginLimiter:
             self.failures.pop(key, None)
 
 
-_MONEY_FIELDS = ("subtotal", "tax", "grand_total", "discount", "shipping", "cgst", "sgst", "igst")
+_MONEY_FIELDS = (
+    "subtotal", "tax", "grand_total", "discount", "shipping", "cgst", "sgst", "igst", "rounding", "deposit",
+)  # fmt: skip
+_MAY_BE_NEGATIVE = ("discount", "rounding", "deposit")
 _DATE_FIELDS = ("invoice_date", "due_date")
 _REQUIRED_FIELDS = ("invoice_number", "invoice_date", "vendor_name", "grand_total")
 
@@ -99,7 +102,7 @@ def clean_edit(name: str, value: Any, credit_note: bool = False) -> Any:
     if name in _MONEY_FIELDS:
         amount = parse_money(text)
         # A discount is often printed as a negative, and credit notes print negatives throughout.
-        if amount is None or (amount < 0 and name != "discount" and not credit_note):
+        if amount is None or (amount < 0 and name not in _MAY_BE_NEGATIVE and not credit_note):
             raise HTTPException(status_code=422, detail=f"{name} must be a clear, non-negative amount like 1250.00.")
         return format(amount, "f")
     if name in _DATE_FIELDS:
@@ -159,6 +162,8 @@ def _check_edited_totals(fields: dict[str, Any], tolerance: Decimal) -> None:
         amount("igst"),
         amount("shipping"),
         amount("discount"),
+        amount("rounding"),
+        amount("deposit"),
     )
     if not any(abs(candidate - total) <= tolerance for candidate in candidates):
         raise HTTPException(
@@ -168,9 +173,24 @@ def _check_edited_totals(fields: dict[str, Any], tolerance: Decimal) -> None:
         )
 
 
-def create_app(settings: Settings | None = None, claude_client: Any = None) -> FastAPI:
-    """claude_client is only for tests. With Claude turned on, the real client is created when it is first needed."""
+def create_app(settings: Settings | None = None, reader: Reader | None = None, claude_client: Any = None) -> FastAPI:
+    """reader and claude_client are only for tests. With the model turned on, the real reader is built when needed."""
     settings = settings or Settings()
+    if reader is None and claude_client is not None:
+        reader = AnthropicReader(settings, claude_client)
+    built: dict[str, Reader | None] = {}
+
+    def get_reader() -> Reader | None:
+        if reader is not None:
+            return reader
+        if "reader" not in built:
+            built["reader"] = build_reader(settings)
+        return built["reader"]
+
+    def can_ask() -> bool:
+        key_ready = settings.llm_provider == "anthropic" or bool(settings.openai_api_key)
+        return reader is not None or (settings.llm_enabled and key_ready)
+
     uploads_dir = settings.data_dir / "uploads"
     pool = ConnectionPool(
         settings.database_url, min_size=1, max_size=10, open=False, kwargs={"autocommit": True, "row_factory": dict_row}
@@ -263,7 +283,7 @@ def create_app(settings: Settings | None = None, claude_client: Any = None) -> F
 
     @app.get("/api/me")
     def me(user: User) -> dict[str, Any]:
-        return {"username": user["username"], "can_ask": settings.llm_enabled or claude_client is not None}
+        return {"username": user["username"], "can_ask": can_ask()}
 
     @app.get("/api/invoices")
     def invoice_search(
@@ -283,12 +303,12 @@ def create_app(settings: Settings | None = None, claude_client: Any = None) -> F
 
     @app.post("/api/ask")
     def ask_about_invoices(body: Question, connection: Conn, user: User) -> dict[str, Any]:
-        client = claude_client
-        if client is None and settings.llm_enabled:
-            client = ClaudeResolver(settings).client
-        if client is None:
-            raise HTTPException(status_code=503, detail="Questions in plain words need Claude to be turned on.")
-        filters = ask.parse_question(client, settings, body.question, date.today())
+        active = get_reader()
+        if active is None:
+            raise HTTPException(
+                status_code=503, detail="Questions in plain words need the language model to be turned on."
+            )
+        filters = ask.parse_question(active, settings, body.question, date.today())
         if filters is None:
             raise HTTPException(
                 status_code=422, detail="I couldn't understand that question. Use the vendor and date boxes instead."

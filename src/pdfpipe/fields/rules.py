@@ -179,6 +179,24 @@ FIELD_LABELS = {
         r"(?:gastos\s*de\s*)?env[íi]o",
         r"(?:spese\s*di\s*)?spedizione",
     ),
+    "rounding": _labels(
+        r"rounding(?:\s*(?:adjustment|off))?",
+        r"round[\s\-]*off",
+        r"rundung(?:sdifferenz)?",
+        r"arrondi",
+        r"redondeo",
+        r"arrotondamento",
+    ),
+    "deposit": _labels(
+        r"deposit",
+        r"advance(?:\s*(?:paid|payment))?",
+        r"prepayment",
+        r"amount\s*paid",
+        r"payment\s*received",
+        r"anzahlung",
+        r"acompte",
+        r"anticipo",
+    ),
     # Indian GST is printed as two or three separate lines instead of one tax line.
     "cgst": _labels(r"cgst(?:\s*amount)?" + _RATE),
     "sgst": _labels(r"(?:sgst|utgst)(?:\s*amount)?" + _RATE),
@@ -192,7 +210,8 @@ _ADDRESS_START = re.compile(r"^\d")
 _CURRENCY_CODE = re.compile(r"^(USD|EUR|GBP|INR|JPY|CAD|AUD|CHF)$", re.IGNORECASE)
 _CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR"}
 _DOC_WORDS = re.compile(
-    r"^(tax\s+)?(invoice|bill|receipt|statement|rechnung|facture|factura|fattura|credit\s+note|credit\s+memo)$",
+    r"^(tax\s+)?(invoice|bill|receipt|statement|rechnung|facture|factura|fattura|factuur|faktura|fatura|"
+    r"nota\s+fiscal|credit\s+note|credit\s+memo|gutschrift|avoir)$",
     re.IGNORECASE,
 )
 # A line shaped "Label: value" is a detail of the document, never a company name.
@@ -203,7 +222,8 @@ _CREDIT_NOTE = re.compile(
 _SUMMARY_ROW = re.compile(
     r"\b(sub[\s\-]*total|total|tax|vat|gst|cgst|sgst|igst|utgst|balance|amount due|discount|shipping|freight|"
     r"handling|postage|rebate|zwischensumme|summe|mwst|ust|versand\w*|rabatt|gesamt\w*|sous[\s\-]*total|tva|"
-    r"remise|iva|descuento|env[íi]o|imposta|sconto|spedizione|totale|imponibile)\b",
+    r"remise|iva|descuento|env[íi]o|imposta|sconto|spedizione|totale|imponibile|rounding|round[\s\-]*off|"
+    r"deposit|advance|prepayment|amount paid|rundung\w*|anzahlung|arrondi|acompte|redondeo|anticipo|arrotondamento)\b",
     re.IGNORECASE,
 )
 
@@ -624,6 +644,8 @@ def extract_fields(document: ExtractedDocument) -> dict[str, FieldValue]:
         "grand_total": find_money(document, "grand_total"),
         "discount": find_money(document, "discount"),
         "shipping": find_money(document, "shipping"),
+        "rounding": find_money(document, "rounding"),
+        "deposit": find_money(document, "deposit"),
         "cgst": find_money(document, "cgst"),
         "sgst": find_money(document, "sgst"),
         "igst": find_money(document, "igst"),

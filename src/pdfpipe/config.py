@@ -46,11 +46,22 @@ class Settings(BaseSettings):
     recovery_max_fields: int = 6
     recovery_max_seconds: float = 25.0
 
-    # Claude (step 16): off unless explicitly enabled and a key is present
+    # The language model (step 18): off unless explicitly enabled and a key is present.
+    # "openai" or "anthropic". Only the one chosen here is ever called.
     llm_enabled: bool = False
+    llm_provider: str = "openai"
+    openai_api_key: str | None = None
+    # A small, cheap model that reads images and can return JSON in a fixed shape.
+    openai_first_model: str = "gpt-4o-mini"
+    # A different model for a second, independent reading. With none set, a value that has no arithmetic to check
+    # it (an invoice number, a date, a name) is only ever suggested to a person, never filled in by the model.
+    openai_second_model: str | None = None
+    openai_image_detail: str = "high"  # "low" is cheaper but reads small digits worse.
     anthropic_api_key: str | None = None
     llm_first_model: str = "claude-haiku-5-5"
-    llm_second_model: str = "claude-sonnet-5-5"
+    llm_second_model: str | None = "claude-sonnet-5-5"
+    # A value for a field the rules couldn't find is filled in only if two different models read the same value.
+    llm_require_agreement: bool = True
     llm_max_tokens: int = 16000  # A ceiling, not a cost: only tokens actually written are billed.
     # Spending limits. Once a limit is reached, the remaining failed fields simply go to a person.
     llm_max_cost_per_document_usd: float = 0.25

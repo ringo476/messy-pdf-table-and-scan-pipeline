@@ -10,7 +10,7 @@ from ..models import CheckResult, ExtractedDocument, FieldValue, PageType
 from .rules import detect_document_type, has_possible_item_table
 
 REQUIRED_FIELDS = ("invoice_number", "invoice_date", "vendor_name", "grand_total", "line_items")
-_MONEY_FIELDS = ("subtotal", "tax", "grand_total", "shipping", "cgst", "sgst", "igst")
+_MONEY_FIELDS = ("subtotal", "tax", "grand_total", "shipping", "cgst", "sgst", "igst", "deposit")
 _DATE_FIELDS = ("invoice_date", "due_date")
 INVOICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/_\-.]*$")
 _LETTERS = re.compile(r"[A-Za-z]")
@@ -36,23 +36,38 @@ def expected_totals(
     igst: Decimal | None,
     shipping: Decimal | None,
     discount: Decimal | None,
+    rounding: Decimal | None = None,
+    deposit: Decimal | None = None,
 ) -> list[Decimal]:
     """The grand totals that a correct invoice could print, given a subtotal (or the sum of its lines).
 
-    Tax is the tax line if there is one. Otherwise it is the sum of the CGST, SGST and IGST lines. A discount is
-    taken off, or is only informational if the subtotal was already reduced, so both totals are possible.
+    Tax is the tax line if there is one. Otherwise it is the sum of the CGST, SGST and IGST lines. Shipping and the
+    rounding adjustment (as printed, so it may be negative) are added. A discount or a deposit is taken off, or is only
+    informational if the amount shown was already reduced, so each can go either way. The first total returned is
+    the one with everything applied.
     """
     tax_total = tax if tax is not None else sum((part for part in (cgst, sgst, igst) if part is not None), Decimal(0))
-    before_discount = base + tax_total + (shipping or Decimal(0))
-    if discount:
-        return [before_discount - abs(discount), before_discount]
-    return [before_discount]
+    core = base + tax_total + (shipping or Decimal(0)) + (rounding or Decimal(0))
+    discounts = [abs(discount), Decimal(0)] if discount else [Decimal(0)]
+    deposits = [abs(deposit), Decimal(0)] if deposit else [Decimal(0)]
+    return [core - off - paid for off in discounts for paid in deposits]
 
 
 def _amounts(fields: dict[str, FieldValue]) -> dict[str, Decimal | None]:
     return {
         name: (fields[name].value if isinstance(fields[name].value, Decimal) else None)
-        for name in ("subtotal", "tax", "grand_total", "discount", "shipping", "cgst", "sgst", "igst")
+        for name in (
+            "subtotal",
+            "tax",
+            "grand_total",
+            "discount",
+            "shipping",
+            "cgst",
+            "sgst",
+            "igst",
+            "rounding",
+            "deposit",
+        )  # fmt: skip
     }
 
 
@@ -66,6 +81,8 @@ def _total_matches(base: Decimal, amounts: dict[str, Decimal | None], tolerance:
         amounts["igst"],
         amounts["shipping"],
         amounts["discount"],
+        amounts["rounding"],
+        amounts["deposit"],
     )
     return (total is not None and any(abs(candidate - total) <= tolerance for candidate in candidates)), candidates
 
@@ -192,7 +209,9 @@ def _check_arithmetic(fields: dict[str, FieldValue], settings: Settings, credit_
     if subtotal is not None and total is not None:
         ok, candidates = _total_matches(subtotal, all_amounts, tolerance)
         detail = "" if ok else f"subtotal plus tax and other charges is {candidates[0]}, but the grand total is {total}"
-        for name in ("grand_total", "subtotal", "tax", "shipping", "discount", "cgst", "sgst", "igst"):
+        for name in (
+            "grand_total", "subtotal", "tax", "shipping", "discount", "cgst", "sgst", "igst", "rounding", "deposit",
+        ):  # fmt: skip
             if name in ("grand_total", "subtotal") or fields[name].value is not None:
                 _add(fields[name], "total_adds_up", ok, detail)
     elif total is not None and not items:
@@ -224,6 +243,25 @@ def _check_lookalike_characters(fields: dict[str, FieldValue]) -> None:
         suspicious = _LOOKALIKE.search(str(number.value))
         detail = f"OCR may have confused look-alike characters in '{suspicious.group(0)}'" if suspicious else ""
         _add(number, "no_lookalike_characters", suspicious is None, detail)
+
+
+def _check_vendor_guess(fields: dict[str, FieldValue]) -> None:
+    """A vendor guessed from the top of the page is only trusted if the rest of the page was understood.
+
+    On an invoice in a language the label rules don't know, the first line is often the word 'Invoice' in that language,
+    or a logo. If neither the invoice number nor the total was found by its label, the page wasn't understood, and the
+    guess can't be trusted, however plausible it looks.
+    """
+    vendor = fields["vendor_name"]
+    guessed_from_heading = vendor.value and vendor.evidence_penalty > 0
+    if guessed_from_heading:
+        understood = fields["invoice_number"].value not in (None, "") and fields["grand_total"].value is not None
+        _add(
+            vendor,
+            "page_understood",
+            understood,
+            "" if understood else "the vendor was guessed from the top of a page whose labels weren't recognised",
+        )
 
 
 def _check_joined_words(fields: dict[str, FieldValue]) -> None:
@@ -311,6 +349,7 @@ def run_checks(fields: dict[str, FieldValue], document: ExtractedDocument, setti
     _check_reading_quality(fields, settings)
     _check_lookalike_characters(fields)
     _check_joined_words(fields)
+    _check_vendor_guess(fields)
     _check_table_structure(fields, document)
     _check_ambiguity(fields)
 

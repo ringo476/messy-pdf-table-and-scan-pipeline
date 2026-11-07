@@ -9,7 +9,8 @@ const FIELD_NAMES = {
   invoice_number: "Invoice number", invoice_date: "Invoice date", due_date: "Due date",
   vendor_name: "Vendor", bill_to: "Bill to", currency: "Currency",
   subtotal: "Subtotal", tax: "Tax", cgst: "CGST", sgst: "SGST", igst: "IGST",
-  shipping: "Shipping", discount: "Discount", grand_total: "Grand total", line_items: "Line items",
+  shipping: "Shipping", discount: "Discount", rounding: "Rounding", deposit: "Deposit paid",
+  grand_total: "Grand total", line_items: "Line items",
 };
 const STATUS_NAMES = {
   queued: "Waiting", running: "Processing", accepted: "Accepted",

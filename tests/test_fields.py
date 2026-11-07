@@ -2,6 +2,8 @@
 
 from decimal import Decimal
 
+import pytest
+
 from conftest import document_of
 from pdfpipe.config import Settings
 from pdfpipe.fields import checks, rules
@@ -212,6 +214,51 @@ class TestExtraCharges:
         assert len(decide(make_document(rows=rows), settings)["line_items"].value) == 2
 
 
+class TestRoundingAndDeposits:
+    def block(self, *rows: str) -> list[tuple[str, float, float]]:
+        header = [line for line in GOOD_LINES if line[1] < 700]
+        return [*header, *[(text, 700, 900 + 40 * index) for index, text in enumerate(rows)]]
+
+    def test_a_rounding_line_is_part_of_the_sum(self, settings: Settings) -> None:
+        lines = self.block("Subtotal 100.00", "Tax 10.03", "Rounding -0.03", "Grand Total 110.00")
+        fields = decide(make_document(lines), settings)
+        assert fields["rounding"].value == Decimal("-0.03")
+        assert fields["grand_total"].needs_review is False
+
+    def test_a_wrong_total_is_still_caught_with_a_rounding_line(self, settings: Settings) -> None:
+        lines = self.block("Subtotal 100.00", "Tax 10.03", "Rounding -0.03", "Grand Total 111.00")
+        assert decide(make_document(lines), settings)["grand_total"].needs_review is True
+
+    def test_a_deposit_is_taken_off_the_amount_due(self, settings: Settings) -> None:
+        lines = self.block("Subtotal 100.00", "Tax 10.00", "Deposit paid 30.00", "Amount Due 80.00")
+        fields = decide(make_document(lines), settings)
+        assert fields["deposit"].value == Decimal("30.00")
+        assert fields["grand_total"].value == Decimal("80.00")
+        assert fields["grand_total"].needs_review is False
+
+    def test_a_deposit_that_is_only_informational_also_adds_up(self, settings: Settings) -> None:
+        lines = self.block("Subtotal 100.00", "Tax 10.00", "Advance 30.00", "Grand Total 110.00")
+        assert decide(make_document(lines), settings)["grand_total"].needs_review is False
+
+    def test_a_total_that_fits_neither_reading_goes_to_review(self, settings: Settings) -> None:
+        lines = self.block("Subtotal 100.00", "Tax 10.00", "Deposit paid 30.00", "Amount Due 95.00")
+        assert decide(make_document(lines), settings)["grand_total"].needs_review is True
+
+    def test_a_deposit_printed_as_a_negative_is_the_same_deposit(self, settings: Settings) -> None:
+        lines = self.block("Subtotal 100.00", "Tax 10.00", "Deposit paid -30.00", "Amount Due 80.00")
+        assert decide(make_document(lines), settings)["grand_total"].needs_review is False
+
+    def test_german_rounding_and_deposit_labels(self, settings: Settings) -> None:
+        lines = self.block("Zwischensumme 100,00", "MwSt 19% 19,00", "Anzahlung 19,00", "Gesamtbetrag 100,00")
+        fields = decide(make_document(lines), settings)
+        assert fields["deposit"].value == Decimal("19.00")
+        assert fields["grand_total"].needs_review is False
+
+    def test_deposit_and_rounding_rows_are_not_line_items(self, settings: Settings) -> None:
+        rows = [*ITEM_ROWS, ["Rounding", "", "", "-0.03"], ["Deposit paid", "", "", "30.00"]]
+        assert len(decide(make_document(rows=rows), settings)["line_items"].value) == 2
+
+
 class TestInvoicesWithoutAnItemTable:
     def one_line_bill(self, total: str = "Grand Total 110.00") -> ExtractedDocument:
         lines = [*without("Grand Total"), (total, 700, 980)]
@@ -303,6 +350,32 @@ class TestTotalsBoxAndJoinedWords:
 
     def test_an_ordinary_ocr_name_is_not_flagged(self, settings: Settings) -> None:
         assert decide(make_document(confidence=0.99), settings)["bill_to"].needs_review is False
+
+
+class TestVendorGuessInUnknownLanguages:
+    """Found by the benchmark: a Dutch invoice's title 'Factuur' was accepted as the vendor, silently."""
+
+    DUTCH = [("Factuur", 100, 40), ("Factuurnummer: F-77", 100, 120), ("Totaal 110,00", 700, 980)]
+
+    def test_a_title_in_an_unknown_language_is_not_a_vendor_that_nobody_checks(self, settings: Settings) -> None:
+        document = document_of(self.DUTCH)
+        document.pages[0].regions[0].bbox = (0, 0, 1200, 1700)
+        fields = decide(document, settings)
+        # Whatever the guess is, it can't be accepted when the page's labels weren't understood.
+        assert fields["vendor_name"].needs_review is True
+
+    def test_a_heading_vendor_is_still_accepted_when_the_page_is_understood(self, settings: Settings) -> None:
+        document = make_document([("Acme Office Supply", 100, 50), *GOOD_LINES[1:]])
+        page = document.pages[0]
+        heading_words = [w for w in page.regions[0].words if w.bbox[1] == 50]
+        page.regions[0].words = [w for w in page.regions[0].words if w.bbox[1] != 50]
+        page.regions.append(Region(type=RegionType.HEADING, bbox=(90, 40, 400, 80), score=0.9, words=heading_words))
+        assert decide(document, settings)["vendor_name"].needs_review is False
+
+    @pytest.mark.parametrize("title", ["Factuur", "Faktura", "Fatura", "Nota Fiscal"])
+    def test_invoice_titles_in_more_languages_are_never_a_vendor(self, title: str) -> None:
+        document = document_of([(title, 100, 50), ("Acme Ltd", 100, 90)])
+        assert rules.extract_fields(document)["vendor_name"].value == "Acme Ltd"
 
 
 class TestCreditNotes:
