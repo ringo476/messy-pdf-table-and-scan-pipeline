@@ -9,7 +9,7 @@ from typing import Any
 from . import __version__
 from .config import Settings
 from .engines import Engines
-from .fields import checks, rules
+from .fields import checks, recovery, rules, visible
 from .models import DocumentResult
 from .pipeline.extract import extract_document
 from .pipeline.intake import inspect_pdf
@@ -27,9 +27,17 @@ def process_pdf(
     info = inspect_pdf(path, settings)  # Step 1
     document = extract_document(path, settings, engines, output_dir)  # Steps 2 to 12
     fields = rules.extract_fields(document)  # Step 13
+    # A digital page's text layer can differ from what the page shows, so the key values are compared with it.
+    if settings.visible_check_enabled:
+        visible.verify_visible_values(
+            fields, path, {page.number: page.type for page in document.pages}, settings, engines
+        )
     checks.run_checks(fields, document, settings)  # Step 14
     # Rule notes like "ambiguous date" were turned into failed checks above.
     checks.score_and_decide(fields, document, settings)  # Step 15
+    if settings.recovery_enabled:
+        # Step 15b: fields that failed a check on a scan are read again in other ways, and kept only if all checks pass.
+        recovery.second_pass(fields, document, path, settings, engines)
 
     usage = None
     if llm is not None:
@@ -39,6 +47,7 @@ def process_pdf(
         fingerprint=info.fingerprint,
         pipeline_version=__version__,
         status="needs_review" if any(field.needs_review for field in fields.values()) else "accepted",
+        document_type=rules.detect_document_type(document),
         page_count=info.page_count,
         fields=fields,
         pages=document.pages,

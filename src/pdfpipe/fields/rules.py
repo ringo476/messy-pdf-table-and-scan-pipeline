@@ -27,17 +27,114 @@ def _labels(*patterns: tuple[str, int] | str) -> list[Label]:
     return labels
 
 
+# A tax rate after a label, as in "CGST 9%" or "VAT (20%)". It is part of the label, so the value is what follows.
+_RATE = r"(?:\s*[@(]?\s*\d+(?:[.,]\d+)?\s*%\)?)?"
+
+# English first, then German, French, Spanish and Italian. A label that isn't listed is never guessed: the
+# field stays empty and goes to a person.
 FIELD_LABELS = {
-    "invoice_number": _labels(r"invoice\s*(?:no|number|num|#|id)\.?", r"inv\s*(?:no|#)\.?", r"bill\s*(?:no|number)\.?"),
-    "invoice_date": _labels(
-        r"invoice\s*date", r"bill\s*date", (r"date\s*of\s*issue", 0), (r"issue\s*date", 0), (r"date", 1)
+    "invoice_number": _labels(
+        r"invoice\s*(?:no|number|num|#|id)\.?",
+        r"inv\s*(?:no|#)\.?",
+        r"bill\s*(?:no|number)\.?",
+        r"rechnungs?[\s\-]*(?:nummer|nr|no)\.?",
+        r"re[\s\-]*nr\.?",
+        r"(?:num[eé]ro|n[°º]|no)\s*de\s*facture",
+        r"facture\s*(?:n[°º]|no|num[eé]ro)\.?",
+        r"n[úu]mero\s*de\s*factura",
+        r"(?:n[°º]|no)\.?\s*(?:de\s*)?factura",
+        r"factura\s*(?:n[°º]|no|n[úu]mero)\.?",
+        r"(?:numero|n[°º]|no)\s*fattura",
+        r"fattura\s*(?:n[°º]|no|numero)\.?",
     ),
-    "due_date": _labels(r"due\s*date", r"payment\s*due(?:\s*date)?", r"pay\s*by"),
-    "vendor_name": _labels(r"vendor", r"seller", r"supplier", r"from", r"bill\s*from"),
-    "bill_to": _labels(r"bill\s*to", r"billed\s*to", r"customer", r"sold\s*to"),
-    "currency": _labels(r"currency"),
-    "subtotal": _labels(r"sub[\s\-]*total", r"net\s*total", r"total\s*before\s*tax", r"net\s*amount"),
-    "tax": _labels(r"(?:sales\s*)?tax(?:\s*amount)?", r"vat(?:\s*amount)?", r"gst(?:\s*amount)?", r"total\s*tax"),
+    "invoice_date": _labels(
+        r"invoice\s*date",
+        r"bill\s*date",
+        (r"date\s*of\s*issue", 0),
+        (r"issue\s*date", 0),
+        (r"date", 1),
+        r"rechnungsdatum",
+        (r"datum", 1),
+        r"date\s*(?:de\s*)?(?:la\s*)?facture",
+        r"date\s*d['’]?[ée]mission",
+        r"fecha\s*(?:de\s*)?(?:factura|emisi[óo]n)",
+        (r"fecha", 1),
+        r"data\s*(?:della\s*)?fattura",
+        (r"data", 1),
+    ),
+    "due_date": _labels(
+        r"due\s*date",
+        r"payment\s*due(?:\s*date)?",
+        r"pay\s*by",
+        r"f[äa]lligkeitsdatum",
+        r"f[äa]llig\s*(?:am|bis)",
+        r"zahlbar\s*bis",
+        r"zahlungsziel",
+        r"date\s*d['’]?[ée]ch[ée]ance",
+        r"[ée]ch[ée]ance",
+        r"fecha\s*(?:de\s*)?vencimiento",
+        r"vencimiento",
+        r"(?:data\s*)?scadenza",
+    ),
+    "vendor_name": _labels(
+        r"vendor",
+        r"seller",
+        r"supplier",
+        r"from",
+        r"bill\s*from",
+        r"lieferant",
+        r"verk[äa]ufer",
+        r"absender",
+        r"fournisseur",
+        r"vendeur",
+        r"[ée]metteur",
+        r"proveedor",
+        r"vendedor",
+        r"emisor",
+        r"fornitore",
+        r"venditore",
+    ),
+    "bill_to": _labels(
+        r"bill\s*to",
+        r"billed\s*to",
+        r"customer",
+        r"sold\s*to",
+        r"rechnung\s*an",
+        r"rechnungsempf[äa]nger",
+        r"kunde",
+        r"factur[ée]\s*[àa]",
+        r"client",
+        r"facturar\s*a",
+        r"facturado\s*a",
+        r"cliente",
+        r"fatturare\s*a",
+        r"intestata\s*a",
+    ),
+    "currency": _labels(r"currency", r"w[äa]hrung", r"devise", r"moneda", r"valuta"),
+    "subtotal": _labels(
+        r"sub[\s\-]*total",
+        r"net\s*total",
+        r"total\s*before\s*tax",
+        r"net\s*amount",
+        r"zwischensumme",
+        r"nettobetrag",
+        r"sous[\s\-]*total",
+        r"total\s*h\.?t\.?",
+        r"montant\s*h\.?t\.?",
+        r"base\s*imponible",
+        r"importe\s*neto",
+        r"subtotale",
+        r"(?:totale\s*)?imponibile",
+    ),
+    "tax": _labels(
+        r"(?:sales\s*)?tax(?:\s*amount)?" + _RATE,
+        r"vat(?:\s*amount)?" + _RATE,
+        r"gst(?:\s*amount)?" + _RATE,
+        r"total\s*tax",
+        r"(?:mwst|ust|mehrwertsteuer|umsatzsteuer|steuer)\.?" + _RATE,
+        r"(?:tva|taxe)" + _RATE,
+        r"(?:iva|impuesto|imposta)" + _RATE,
+    ),
     "grand_total": _labels(
         r"grand\s*total",
         r"total\s*(?:amount\s*)?due",
@@ -45,7 +142,47 @@ FIELD_LABELS = {
         r"balance\s*due",
         r"invoice\s*total",
         (r"total(?:\s*amount)?", 1),
+        r"gesamtbetrag",
+        r"rechnungsbetrag",
+        r"gesamtsumme",
+        r"endbetrag",
+        r"zu\s*zahlen",
+        r"total\s*ttc",
+        r"montant\s*ttc",
+        r"net\s*[àa]\s*payer",
+        r"total\s*[àa]\s*payer",
+        r"montant\s*total",
+        r"total\s*a\s*pagar",
+        r"importe\s*total",
+        r"total\s*factura",
+        r"totale\s*fattura",
+        r"totale\s*da\s*pagare",
+        (r"totale", 1),
     ),
+    # Charges and reductions between the subtotal and the total. Without them, a total with a shipping fee or
+    # a discount could never add up, and a correct invoice would always go to a person.
+    "discount": _labels(
+        r"(?:total\s*)?discount" + _RATE,
+        r"rebate",
+        r"rabatt" + _RATE,
+        r"nachlass",
+        r"remise" + _RATE,
+        r"r[ée]duction",
+        r"descuento" + _RATE,
+        r"sconto" + _RATE,
+    ),
+    "shipping": _labels(
+        r"(?:shipping|freight|postage|handling)(?:\s*(?:and|&|/)\s*handling)?(?:\s*(?:charges?|costs?|fees?))?",
+        r"delivery\s*(?:charges?|costs?|fees?)",
+        r"versand(?:kosten)?",
+        r"frais\s*(?:de\s*)?(?:port|livraison|exp[ée]dition)",
+        r"(?:gastos\s*de\s*)?env[íi]o",
+        r"(?:spese\s*di\s*)?spedizione",
+    ),
+    # Indian GST is printed as two or three separate lines instead of one tax line.
+    "cgst": _labels(r"cgst(?:\s*amount)?" + _RATE),
+    "sgst": _labels(r"(?:sgst|utgst)(?:\s*amount)?" + _RATE),
+    "igst": _labels(r"igst(?:\s*amount)?" + _RATE),
 }
 ALL_LABEL_PATTERNS = [label for labels in FIELD_LABELS.values() for label in labels]
 
@@ -54,16 +191,40 @@ _GLUED_LABEL = re.compile(r"^([A-Za-z][A-Za-z.]*[:#])([^\s:/].*)$")
 _ADDRESS_START = re.compile(r"^\d")
 _CURRENCY_CODE = re.compile(r"^(USD|EUR|GBP|INR|JPY|CAD|AUD|CHF)$", re.IGNORECASE)
 _CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR"}
-_DOC_WORDS = re.compile(r"^(tax\s+)?(invoice|bill|receipt|statement)$", re.IGNORECASE)
+_DOC_WORDS = re.compile(
+    r"^(tax\s+)?(invoice|bill|receipt|statement|rechnung|facture|factura|fattura|credit\s+note|credit\s+memo)$",
+    re.IGNORECASE,
+)
+# A line shaped "Label: value" is a detail of the document, never a company name.
+_KEY_VALUE_LINE = re.compile(r"^[^\W\d_][\w .#/'’-]{0,30}:\s*\S")
+_CREDIT_NOTE = re.compile(
+    r"\b(credit\s*(?:note|memo)|gutschrift|avoir|nota\s*de\s*cr[ée]dito|nota\s*di\s*credito)\b", re.IGNORECASE
+)
 _SUMMARY_ROW = re.compile(
-    r"\b(sub[\s\-]*total|total|tax|vat|gst|balance|amount due|discount|shipping)\b", re.IGNORECASE
+    r"\b(sub[\s\-]*total|total|tax|vat|gst|cgst|sgst|igst|utgst|balance|amount due|discount|shipping|freight|"
+    r"handling|postage|rebate|zwischensumme|summe|mwst|ust|versand\w*|rabatt|gesamt\w*|sous[\s\-]*total|tva|"
+    r"remise|iva|descuento|env[íi]o|imposta|sconto|spedizione|totale|imponibile)\b",
+    re.IGNORECASE,
 )
 
 _COLUMN_HEADERS = {
-    "description": re.compile(r"\b(description|item|product|service|particulars|details)\b", re.IGNORECASE),
-    "quantity": re.compile(r"\b(qty|quantity|units?|hours?|hrs)\b", re.IGNORECASE),
-    "unit_price": re.compile(r"\b(unit\s*price|unit\s*cost|price|rate)\b", re.IGNORECASE),
-    "amount": re.compile(r"\b(amount|line\s*total|total|net|ext\w*)\b", re.IGNORECASE),
+    "description": re.compile(
+        r"\b(description|item|product|service|particulars|details|beschreibung|bezeichnung|artikel|position|"
+        r"d[ée]signation|libell[ée]|descripci[óo]n|concepto|descrizione)\b",
+        re.IGNORECASE,
+    ),
+    "quantity": re.compile(
+        r"\b(qty|quantity|units?|hours?|hrs|menge|anzahl|quantit[ée]|qt[ée]|cantidad|cant|quantit[àa])\b",
+        re.IGNORECASE,
+    ),
+    "unit_price": re.compile(
+        r"\b(unit\s*price|unit\s*cost|price|rate|einzelpreis|preis|prix(?:\s*unitaire)?|precio(?:\s*unitario)?|"
+        r"prezzo(?:\s*unitario)?)\b",
+        re.IGNORECASE,
+    ),
+    "amount": re.compile(
+        r"\b(amount|line\s*total|total|net|ext\w*|betrag|gesamt\w*|montant|importe|importo)\b", re.IGNORECASE
+    ),
 }
 
 
@@ -246,8 +407,8 @@ def find_date(document: ExtractedDocument, name: str) -> FieldValue:
     parsed = []
     ambiguous = False
     for candidate in _best(_candidates(document, FIELD_LABELS[name])):
-        # A date is at most four words, for example "October 24, 2026".
-        for length in range(min(4, len(candidate.words)), 0, -1):
+        # A date is at most five words, for example "5 de marzo de 2026". Longer text can't parse as one date.
+        for length in range(min(5, len(candidate.words)), 0, -1):
             part = candidate.words[:length]
             value, unclear = parse_date(" ".join(word.text for word in part))
             if value is not None:
@@ -299,7 +460,12 @@ def find_vendor(document: ExtractedDocument) -> FieldValue:
             break
         first_piece = _split_at_gaps(line)[0]
         text = " ".join(word.text for word in first_piece)
-        if _DOC_WORDS.match(text) or _is_any_label(first_piece) or _ADDRESS_START.match(text):
+        if (
+            _DOC_WORDS.match(text)
+            or _is_any_label(first_piece)
+            or _ADDRESS_START.match(text)
+            or _KEY_VALUE_LINE.match(text)
+        ):
             continue
         result = _field(Candidate(first_piece, page.number, 0), text)
         in_heading = any(overlap_of(first_piece[0].bbox, box) >= 0.5 for box in heading_boxes)
@@ -342,6 +508,23 @@ def _map_columns(rows: list[list[str]]) -> tuple[dict[str, int], int] | None:
         if "description" in columns and "amount" in columns:
             return columns, header_rows
     return None
+
+
+def _is_totals_box(table: JoinedTable) -> bool:
+    """A small table that only holds Subtotal, Tax and Total rows, as most invoices print beside their totals."""
+    rows = [row for row in table.rows if any(cell.strip() for cell in row)]
+    if not rows:
+        return False
+    return all(_SUMMARY_ROW.search(next((cell for cell in row if cell.strip()), "")) for row in rows)
+
+
+def has_possible_item_table(document: ExtractedDocument) -> bool:
+    """True if any table could be a list of items, even one whose headers weren't recognised.
+
+    A totals box doesn't count. Any other table might be an item list that was missed, so an invoice with one is
+    never treated as having no items.
+    """
+    return any(not _is_totals_box(table) for table in document.tables)
 
 
 def find_line_items(document: ExtractedDocument) -> FieldValue:
@@ -411,6 +594,22 @@ def _read_items(table: JoinedTable, columns: dict[str, int], header_rows: int) -
     return result
 
 
+def detect_document_type(document: ExtractedDocument) -> str:
+    """ "credit_note" if the top of the first page says so, otherwise "invoice".
+
+    A credit note repeats an invoice's layout with amounts that are owed back, so they may print as negatives.
+    """
+    if not document.pages:
+        return "invoice"
+    page = document.pages[0]
+    for line in _page_lines(page):
+        if line[0].bbox[1] > page.height / 2.5:
+            break
+        if _CREDIT_NOTE.search(" ".join(word.text for word in line)):
+            return "credit_note"
+    return "invoice"
+
+
 def extract_fields(document: ExtractedDocument) -> dict[str, FieldValue]:
     return {
         "invoice_number": find_invoice_number(document),
@@ -423,4 +622,9 @@ def extract_fields(document: ExtractedDocument) -> dict[str, FieldValue]:
         "subtotal": find_money(document, "subtotal"),
         "tax": find_money(document, "tax"),
         "grand_total": find_money(document, "grand_total"),
+        "discount": find_money(document, "discount"),
+        "shipping": find_money(document, "shipping"),
+        "cgst": find_money(document, "cgst"),
+        "sgst": find_money(document, "sgst"),
+        "igst": find_money(document, "igst"),
     }

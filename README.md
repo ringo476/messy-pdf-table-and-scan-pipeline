@@ -55,27 +55,54 @@ Every page goes through the same steps. The only difference between page types i
 10. **Put the regions in reading order**, including across columns.
 11. **Save the charts** as images, marked as not extracted. Their values are never guessed.
 12. **Join split tables** when a table continues on the next page and its columns line up.
-13. **Extract the fields** with rules. Each value records its page and position, and a field stays empty if it isn't found.
-14. **Check the values** with ordinary code: required fields, formats, line and total arithmetic, OCR confidence, look-alike characters in IDs, table structure, and conflicting values.
-15. **Score each field and decide.** A field is accepted only if it passes all its checks and its score is at least 0.85. A failed check caps the score at 0.5.
-16. **Handle the failed fields.** They go to a person. If Claude is turned on, they first go to Haiku, then once to Sonnet, and the same checks run again after each answer. If Claude disagrees with what was read, a person decides, with Claude's answer shown as a suggestion.
-17. **Save the result** as JSON. Chart images are separate files, and the JSON stores their paths.
+13. **Extract the fields** with rules. Each value records its page and position, and a field stays empty if it isn't found. Labels are read in English, German, French, Spanish and Italian. The fields include the subtotal, tax, CGST, SGST, IGST, shipping, discount, and the grand total. A credit note is recognised from its title.
+14. **Compare key values with the page.** For a digital page, the invoice number, dates, subtotal, tax and total are read from the text layer. The page is rendered, and only the small area around each of those values is read with OCR. A value that isn't visible on the page, or that the page shows differently, fails a check. This catches text hidden in white, or a text layer that says 400 while the page shows 500.
+15. **Check the values** with ordinary code:
+    - Required fields, formats, and OCR confidence.
+    - Quantity times price equals each line amount.
+    - The lines add up to the subtotal. With no subtotal, the lines plus tax and charges must make the total.
+    - The subtotal plus tax (or CGST, SGST and IGST) plus shipping minus any discount equals the total.
+    - Look-alike characters in IDs, and words that OCR has run together in names and item descriptions.
+    - Table structure, and conflicting values.
+    - An invoice with no item table, such as a one-line bill, needs no person only if no table that could hold items exists, the missed-text check didn't have to recover anything, and the subtotal and charges add up to the total. A small totals box doesn't count as an item table.
+16. **Score each field and decide.** A field is accepted only if it passes all its checks and its score is at least 0.85. A failed check caps the score at 0.5.
+17. **Read failed scan fields again.** For a field that failed a check on a scan, the line is read again zoomed in, sharpened, and in black and white. A new reading replaces the old one only if every check then passes and no other field gets worse. A money value needs the arithmetic to confirm it. An invoice number or a date needs two different ways of reading to agree. Nothing is guessed.
+18. **Handle what is still failing.** It goes to a person. If Claude is turned on, the fields first go to Haiku, then once to Sonnet, and the same checks run again after each answer. If Claude disagrees with what was read, a person decides, with Claude's answer shown as a suggestion.
+19. **Check against earlier invoices.** The same user's earlier invoices from the same vendor are looked up. The invoice is flagged if the vendor and invoice number were already processed, if the number doesn't look like that vendor's usual ones (for example `INV-l005` after `INV-1001` to `INV-1004`), or if the currency differs from the vendor's usual one. Nothing from another user is ever used.
+20. **Save the result** as JSON. Chart images are separate files, and the JSON stores their paths.
+
+## Searching your invoices
+
+The web page has a search box for the user's own accepted and reviewed invoices, by vendor and date range. The totals are added up per currency by the server, and credit notes are taken off. An invoice that still needs review is not counted.
+
+If Claude is turned on, a question can be typed in plain words, such as "what did Acme invoice us last quarter?". Claude only turns the question into three filters: a vendor and a date range. The search and the sums are done by plain code over that user's own invoices, and the filters it chose are shown with the answer. Claude never sees the invoices and never writes the answer.
 
 ## Measured results
 
 These come from generated documents only. **Accuracy on real invoices has not been measured.** The generator can't produce every way that real documents go wrong, so expect real-world results to be worse.
 
-Accuracy, on 162 generated documents the pipeline wasn't tuned on (1,620 fields, Claude off):
+**Standard set**, on 162 freshly generated documents the code had never been run on (1,620 fields, Claude off). It was run once.
 
-- **Silent errors (wrong values accepted without review): 0**
-- Correct values: 99.38%
-- Fields sent to review: 8.46%
-- Table cell F1: 0.973
+- **Silent errors (wrong values accepted without review): 1.** One line-item description had lost a space (`Whiteboardmarkers`) in a 54-item scan, while every number was right. I then added a check for words of 16 or more letters run together. That check has not been measured on unseen documents, and it can't catch a short pair such as `Officechair`.
+- Correct values: 99.44%
+- Fields sent to review: 8.27%
+- Table cell F1: 0.972
 - Crashes: 0
 - Documents that must be reviewed but were accepted: 0 of 36
 - Documents accepted with no review at all: 80 of the 126 that had no planted problem
-- Time per page: 0.82 s median, 3.74 s at the 95th percentile (about 0.6 s for digital pages, 2–3.5 s for scans)
+- The second pass fixed 10 fields on scans, and none of them was wrong.
+- Time per page: 1.19 s median and 5.03 s at the 95th percentile. Digital pages take about 1.0 s. Scans take 3.4 to 4.3 s.
 - Claude cost: $0
+
+**Variants**, on 48 generated documents (extra shipping and discount lines, split CGST and SGST, credit notes, a one-line bill with no item table, German and French invoices, each as a digital PDF and as a scan). It was run once on new seeds.
+
+- Silent errors: 0
+- Correct values: 99.8%
+- Documents accepted with no review at all: 42 of 48
+- One name with a dropped space on a scanned credit note was caught by the new check and sent to review.
+- Spanish and Italian labels are only unit-tested. No generated Spanish or Italian documents exist.
+
+Two cautions about these numbers. The first standard set I used (seeds 100 to 102) is no longer a fair test, because I used its failures to fix the date reading, the vendor guess, and the second pass. And each time a check is added after looking at failures, the set it was tuned on stops being unseen. The numbers above are the ones taken before the last fix.
 
 Four users uploading at the same moment (3 workers, 6 cores):
 
@@ -86,10 +113,14 @@ Four users uploading at the same moment (3 workers, 6 cores):
 - No user could see another user's work.
 - Peak memory was about 860 MB per worker.
 
-To repeat these, run the commands below with the system running. Replace `PASSWORD` with the one in your `.env`.
+To repeat these, run the commands below with the system running. Replace `PASSWORD` with the one in your `.env`. Use a new `--first-seed` for a fair test.
 
 ```bash
-python -m pdfpipe.evaluation.benchmark --out eval_out/unseen --seeds 3 --first-seed 100
+python -m pdfpipe.evaluation.benchmark --out eval_out/standard --seeds 3 --first-seed 400
+```
+
+```bash
+python -m pdfpipe.evaluation.benchmark --out eval_out/variants --seeds 4 --first-seed 300 --variants
 ```
 
 ```bash
@@ -100,9 +131,15 @@ python scripts/load_test.py --db-url postgresql://pdfpipe:PASSWORD@127.0.0.1:543
 
 - **Not tested on real documents.** This is the biggest gap. Run real invoices through it before trusting the numbers above.
 - **The Claude step has never called the real API.** It has only been tested with a fake client, so its real accuracy and cost are unknown.
-- **Invoices only.** The field rules, labels, and checks are written for invoices.
-- **Some invoice layouts go to review instead of being understood.** Tax split into CGST and SGST, shipping, discounts, and credit notes make the totals fail the sum check, so a person handles them.
-- **A digital PDF can show one number and hide another in its text layer.** The pipeline reads the text layer and doesn't compare it with what the page shows.
+- **Invoices only.** The field rules, labels, and checks are written for invoices and credit notes. Other document types get their text and tables, but no meaningful fields.
+- **Labels in other languages.** English, German, French, Spanish and Italian are read. A label in any other language is not found, and the field goes to review. Spanish and Italian have unit tests only.
+- **Handwriting and photographed pages have not been tested.**
+- **Other charges.** Shipping, discount, tax and CGST/SGST/IGST are understood. Any other charge, such as a deposit, a rounding line, or a per-line discount, makes the total fail its check, so a person handles it.
+- **Names and descriptions read by OCR have no arithmetic to protect them.** Words that OCR ran together are caught for names, and for item descriptions only when a word is 16 or more letters long. A shorter pair such as `Officechair` passes.
+- **The hidden-text check covers six fields** (the invoice number, both dates, subtotal, tax and total), and digital pages only. A different value hidden in the vendor name or an item description isn't compared. It also adds about 0.4 s to each digital page. Set `PDFPIPE_VISIBLE_CHECK_ENABLED=false` to turn it off.
+- **The second pass is a bounded retry, not an AI agent.** It uses only the local OCR, on scanned pages, and keeps a new reading only when every check agrees. The Claude step is the other reader.
+- **Memory of earlier invoices is only as good as what it learned.** It needs three earlier invoices from a vendor before it judges a number's shape. It learns from invoices that were accepted, and a wrong value that slipped through would teach a wrong pattern. It can't catch a wrong digit inside the right pattern, such as `INV-1048` for `INV-1042`.
+- **Asking in plain words needs Claude on,** and those small calls are not counted against the daily budget. It has only been tested with a fake client.
 - **An amount like `1.234` is left for a person.** It is 1234 in some countries and 1.234 in others, so it isn't guessed. European invoices with whole amounts written like `1.250` therefore go to review.
 - **Thresholds are hand-set.** The 0.85 minimum and the score formula haven't been calibrated against real error rates.
 - **Half of the generated documents still need a person for at least one field.** Some of that is deliberate: 36 of the 162 had planted problems.
@@ -111,6 +148,7 @@ python scripts/load_test.py --db-url postgresql://pdfpipe:PASSWORD@127.0.0.1:543
 - **Uploading the same file again reuses the old result** even if settings changed in between, such as turning Claude on.
 - **Retries start the whole document again.** Results aren't saved page by page.
 - **Monitoring is basic.** There are logs and a `/health` endpoint, but no dashboard.
+- **There is no backup and no retention rule.** Uploaded files and results stay until a user deletes them.
 - **Traffic is plain HTTP**, so it's only suitable for one PC or a trusted network.
 - **PDFs that hide scripts or attachments are not cleaned.** Those parts are never run, but they stay in the stored file.
 

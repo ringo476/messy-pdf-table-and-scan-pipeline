@@ -1,6 +1,7 @@
 """Turns printed dates and amounts into exact values, and refuses to guess when they are unclear."""
 
 import re
+import unicodedata
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -55,11 +56,63 @@ def parse_money(text: str) -> Decimal | None:
     return -value if cleaned.startswith(("(", "-")) else value
 
 
+_MONTH_NAMES = {
+    "jan": ("jan", "januar", "janvier", "enero", "gennaio", "janeiro"),
+    "feb": ("feb", "februar", "fevrier", "febrero", "febbraio", "fevereiro"),
+    "mar": ("mar", "marz", "maerz", "mrz", "mars", "marzo", "marco"),
+    "apr": ("apr", "avril", "abril", "aprile"),
+    "may": ("may", "mai", "mayo", "maggio", "maio"),
+    "jun": ("jun", "juni", "juin", "junio", "giugno", "junho"),
+    "jul": ("jul", "juli", "juillet", "julio", "luglio", "julho"),
+    "aug": ("aug", "august", "aout", "agosto"),
+    "sep": ("sep", "sept", "september", "septembre", "septiembre", "setiembre", "settembre", "setembro"),
+    "oct": ("oct", "okt", "oktober", "octobre", "octubre", "ottobre", "outubro"),
+    "nov": ("nov", "november", "novembre", "noviembre", "novembro"),
+    "dec": ("dec", "dez", "dezember", "decembre", "diciembre", "dicembre", "dezembro"),
+}
+# English months aren't remapped, so "March" stays as it is. Only other languages need translating.
+_MONTH_LOOKUP = {word: english for english, words in _MONTH_NAMES.items() for word in words}
+_FILLER_WORDS = re.compile(r"\b(de|del|der|of|le|el|am)\b", re.IGNORECASE)
+
+
+def _plain(token: str) -> str:
+    """Lowercase and without accents, so 'Août' and 'aout' look the same."""
+    decomposed = unicodedata.normalize("NFKD", token.lower())
+    return "".join(character for character in decomposed if not unicodedata.combining(character))
+
+
+def _translate_months(text: str) -> str:
+    def swap(match: re.Match[str]) -> str:
+        token = match.group(0)
+        plain = _plain(token)
+        # Names English already understands (march, mar, may) are left alone.
+        if plain in _ENGLISH_MONTH_WORDS:
+            return token
+        return _MONTH_LOOKUP.get(plain, token)
+
+    return re.sub(r"[^\W\d_]+", swap, text)
+
+
+_ENGLISH_MONTH_WORDS = {
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+}  # fmt: skip
+
+
 def parse_date(text: str) -> tuple[date | None, bool]:
     """Returns (date, ambiguous). 03/04/2026 can be 3 April or March 4, so it's marked ambiguous."""
     cleaned = re.sub(r"\s+", " ", text.strip().rstrip(".,;")).replace(",", ", ").replace(" ,", ",")
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", cleaned)
+    # A full stop after a month ("5 Mar. 2026") and a missing space ("February16", "18 Jun2026") are common
+    # in scans. Both are fixed before parsing, and the parse itself stays strict.
+    cleaned = re.sub(r"(?<=[^\W\d_])\.", "", cleaned)
+    cleaned = re.sub(r"(?<=\d)\.(?=\s*[^\W\d_])", "", cleaned)  # "5. März 2026"
+    cleaned = re.sub(r"(?<=[^\W\d_])(?=\d)|(?<=\d)(?=[^\W\d_])", " ", cleaned)
+    cleaned = _translate_months(cleaned)
+    cleaned = _FILLER_WORDS.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
     match = _ISO_DATE.match(cleaned)
     if match:

@@ -7,6 +7,7 @@ import uuid
 from collections import defaultdict, deque
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from datetime import date
 from decimal import Decimal
 from importlib import resources
 from pathlib import Path
@@ -22,10 +23,11 @@ from pydantic import BaseModel
 
 from .. import __version__
 from ..config import Settings
-from ..fields.checks import INVOICE_ID
+from ..fields.checks import INVOICE_ID, expected_totals
+from ..fields.llm import ClaudeResolver
 from ..fields.values import parse_date, parse_money
 from ..pipeline.intake import RejectedFile
-from . import auth, db
+from . import ask, auth, db
 from .safe_intake import inspect_in_process
 from .worker import copy_reused_files, job_dir
 
@@ -43,6 +45,10 @@ class Credentials(BaseModel):
 class FieldEdit(BaseModel):
     name: str
     value: Any = None
+
+
+class Question(BaseModel):
+    question: str
 
 
 class ReviewRequest(BaseModel):
@@ -74,12 +80,12 @@ class LoginLimiter:
             self.failures.pop(key, None)
 
 
-_MONEY_FIELDS = ("subtotal", "tax", "grand_total")
+_MONEY_FIELDS = ("subtotal", "tax", "grand_total", "discount", "shipping", "cgst", "sgst", "igst")
 _DATE_FIELDS = ("invoice_date", "due_date")
 _REQUIRED_FIELDS = ("invoice_number", "invoice_date", "vendor_name", "grand_total")
 
 
-def clean_edit(name: str, value: Any) -> Any:
+def clean_edit(name: str, value: Any, credit_note: bool = False) -> Any:
     """Checks a person's typed value the same way the automatic one was checked, and returns it in the stored form."""
     text = "" if value is None else str(value).strip()
     if not text:
@@ -92,7 +98,8 @@ def clean_edit(name: str, value: Any) -> Any:
         )
     if name in _MONEY_FIELDS:
         amount = parse_money(text)
-        if amount is None or amount < 0:
+        # A discount is often printed as a negative, and credit notes print negatives throughout.
+        if amount is None or (amount < 0 and name != "discount" and not credit_note):
             raise HTTPException(status_code=422, detail=f"{name} must be a clear, non-negative amount like 1250.00.")
         return format(amount, "f")
     if name in _DATE_FIELDS:
@@ -110,6 +117,7 @@ def clean_edit(name: str, value: Any) -> Any:
 def apply_review(
     machine: dict[str, Any], current: dict[str, Any] | None, request: ReviewRequest, tolerance: float = 0.01
 ) -> tuple[dict[str, Any], list[tuple[str, Any, Any]]]:
+    credit_note = machine.get("document_type") == "credit_note"
     """Applies a person's edits on top of the machine's fields. The machine's output stays unchanged.
 
     Typed values go through the same format and total checks as automatic ones. A person who believes the
@@ -121,10 +129,10 @@ def apply_review(
         if edit.name not in fields:
             raise HTTPException(status_code=422, detail=f"Unknown field: {edit.name}")
         field = fields[edit.name]
-        cleaned = clean_edit(edit.name, edit.value)
+        cleaned = clean_edit(edit.name, edit.value, credit_note)
         changes.append((edit.name, field.get("value"), cleaned))
         field.update(value=cleaned, source="person", needs_review=False, confidence=1.0, review_reasons=[])
-    if any(edit.name in _MONEY_FIELDS for edit in request.edits):
+    if any(edit.name in _MONEY_FIELDS for edit in request.edits) and not credit_note:
         _check_edited_totals(fields, Decimal(str(tolerance)))
     for name in request.approve:
         if name not in fields:
@@ -140,19 +148,28 @@ def _check_edited_totals(fields: dict[str, Any], tolerance: Decimal) -> None:
         value = fields.get(name, {}).get("value")
         return parse_money(str(value)) if value not in (None, "") else None
 
-    subtotal, tax, total = amount("subtotal"), amount("tax"), amount("grand_total")
+    subtotal, total = amount("subtotal"), amount("grand_total")
     if subtotal is None or total is None:
         return
-    expected = subtotal + (tax or Decimal(0))
-    if abs(expected - total) > tolerance:
+    candidates = expected_totals(
+        subtotal,
+        amount("tax"),
+        amount("cgst"),
+        amount("sgst"),
+        amount("igst"),
+        amount("shipping"),
+        amount("discount"),
+    )
+    if not any(abs(candidate - total) <= tolerance for candidate in candidates):
         raise HTTPException(
             status_code=422,
-            detail=f"The subtotal plus tax is {expected}, but the grand total is {total}. "
+            detail=f"The subtotal plus tax and other charges is {candidates[0]}, but the grand total is {total}. "
             "Correct the values, or approve the printed ones if the document itself is wrong.",
         )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, claude_client: Any = None) -> FastAPI:
+    """claude_client is only for tests. With Claude turned on, the real client is created when it is first needed."""
     settings = settings or Settings()
     uploads_dir = settings.data_dir / "uploads"
     pool = ConnectionPool(
@@ -246,7 +263,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/me")
     def me(user: User) -> dict[str, Any]:
-        return {"username": user["username"]}
+        return {"username": user["username"], "can_ask": settings.llm_enabled or claude_client is not None}
+
+    @app.get("/api/invoices")
+    def invoice_search(
+        connection: Conn,
+        user: User,
+        vendor: str | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> dict[str, Any]:
+        """The user's own accepted and reviewed invoices, with totals worked out by code."""
+        rows = db.search_invoices(connection, user["id"], vendor, date_from, date_to)
+        totals = ask.total_by_currency(rows)
+        filters = {"vendor": vendor or None, "date_from": date_from, "date_to": date_to}
+        return db.to_jsonable(
+            {"invoices": rows, "totals": totals, "summary": ask.describe(filters, rows, totals), "filters": filters}
+        )
+
+    @app.post("/api/ask")
+    def ask_about_invoices(body: Question, connection: Conn, user: User) -> dict[str, Any]:
+        client = claude_client
+        if client is None and settings.llm_enabled:
+            client = ClaudeResolver(settings).client
+        if client is None:
+            raise HTTPException(status_code=503, detail="Questions in plain words need Claude to be turned on.")
+        filters = ask.parse_question(client, settings, body.question, date.today())
+        if filters is None:
+            raise HTTPException(
+                status_code=422, detail="I couldn't understand that question. Use the vendor and date boxes instead."
+            )
+        rows = db.search_invoices(connection, user["id"], filters["vendor"], filters["date_from"], filters["date_to"])
+        totals = ask.total_by_currency(rows)
+        return db.to_jsonable(
+            {"invoices": rows, "totals": totals, "summary": ask.describe(filters, rows, totals), "filters": filters}
+        )
 
     @app.post("/api/jobs", status_code=202)
     def upload(file: UploadFile, connection: Conn, user: User) -> dict[str, Any]:
@@ -335,6 +386,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=f"These fields still need a decision: {', '.join(still_open)}")
         if not db.save_review(connection, job["id"], user["id"], reviewed, changes, body.finish):
             raise HTTPException(status_code=409, detail="This document can't be reviewed right now.")
+        if body.finish:
+            # What a person confirmed is the most trustworthy record of this invoice.
+            db.record_invoice(
+                connection, job["id"], user["id"], "reviewed", job["result"]["machine"], reviewed["fields"]
+            )
         return {"still_needs_review": still_open, "finished": body.finish}
 
     @app.delete("/api/jobs/{job_id}", status_code=204)

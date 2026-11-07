@@ -23,7 +23,7 @@ from ..engines import Engines
 from ..fields.llm import build_resolver
 from ..pipeline.intake import RejectedFile
 from ..process import process_pdf, result_to_dict
-from . import db
+from . import db, history
 
 logger = logging.getLogger("pdfpipe.worker")
 
@@ -132,6 +132,37 @@ class Extractor:
             raise
 
 
+def check_against_history(connection: db.Connection, job: dict[str, Any], machine: dict[str, Any]) -> dict[str, Any]:
+    """Checks the result against this user's earlier invoices from the same vendor.
+
+    The history is an extra safeguard. If it can't be read, the job still finishes, and the result says the history
+    wasn't checked, so nobody assumes it was.
+    """
+    vendor = (machine.get("fields", {}).get("vendor_name") or {}).get("value")
+    machine["history_checked"] = False
+    if not vendor:
+        return machine
+    try:
+        earlier = db.vendor_records(connection, job["user_id"], str(vendor), job["id"])
+        return history.apply_history(machine, earlier)
+    except psycopg.OperationalError:
+        raise  # A lost connection is handled by the worker's reconnect logic.
+    except Exception:
+        logger.exception("job %s: the vendor history check failed", job["id"])
+        return machine
+
+
+def remember(connection: db.Connection, job: dict[str, Any], machine: dict[str, Any]) -> None:
+    try:
+        db.record_invoice(
+            connection, job["id"], job["user_id"], str(machine["status"]), machine, machine.get("fields", {})
+        )
+    except psycopg.OperationalError:
+        raise
+    except Exception:
+        logger.exception("job %s: could not save the invoice record", job["id"])
+
+
 def handle_job(
     job: dict[str, Any], connection: db.Connection, extractor: Extractor, settings: Settings, worker: str
 ) -> str:
@@ -159,7 +190,9 @@ def handle_job(
         budget = max(0.0, settings.llm_daily_budget_usd - db.llm_spend_today(connection))
     status, value = extractor.run(pdf_path, folder, still_ours, budget)
     if status == "done":
-        db.complete_job(connection, job_id, worker, value)
+        value = check_against_history(connection, job, value)
+        if db.complete_job(connection, job_id, worker, value):
+            remember(connection, job, value)
         return str(value["status"])
     if status == "rejected":
         db.fail_or_retry_job(connection, job_id, worker, str(value), settings.job_max_attempts, retry=False)

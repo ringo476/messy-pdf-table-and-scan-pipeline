@@ -76,6 +76,7 @@ class Invoice:
     tax: float
     grand_total: float
     printed_total: float = 0.0
+    shipping: float = 0.0
     show_invoice_number: bool = True
     extra_paragraph: str | None = None
     date_format: str = "%d %b %Y"
@@ -382,6 +383,232 @@ def _scan_pdf_with_layer(source: Path, target: Path, rng: random.Random, conditi
         output.showPage()
     output.save()
     document.close()
+
+
+VARIANTS = ["shipping_discount", "split_gst", "credit_note", "no_table", "german", "french"]
+
+_GERMAN_MONTHS = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember",
+]  # fmt: skip
+_FRENCH_MONTHS = [
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+]  # fmt: skip
+
+_LOCALES: dict[str, dict[str, Any]] = {
+    "english": {
+        "title": "Tax Invoice",
+        "number": "Invoice No",
+        "date": "Invoice Date",
+        "due": "Due Date",
+        "bill": "Bill To",
+        "currency": "Currency",
+        "vendor": None,
+        "headers": ["Description", "Qty", "Unit Price", "Amount"],
+        "subtotal": "Subtotal",
+        "tax": "Tax",
+        "total": "Grand Total",
+        "decimal": ".",
+        "months": None,
+    },
+    "german": {
+        "title": "Rechnung",
+        "number": "Rechnungsnummer",
+        "date": "Rechnungsdatum",
+        "due": "Fälligkeitsdatum",
+        "bill": "Rechnung an",
+        "currency": "Währung",
+        "vendor": "Lieferant",
+        "headers": ["Beschreibung", "Menge", "Einzelpreis", "Betrag"],
+        "subtotal": "Zwischensumme",
+        "tax": "MwSt",
+        "total": "Gesamtbetrag",
+        "decimal": ",",
+        "months": _GERMAN_MONTHS,
+    },
+    "french": {
+        "title": "Facture",
+        "number": "Facture N°",
+        "date": "Date de facture",
+        "due": "Date d'échéance",
+        "bill": "Client",
+        "currency": "Devise",
+        "vendor": "Fournisseur",
+        "headers": ["Désignation", "Quantité", "Prix unitaire", "Montant"],
+        "subtotal": "Total HT",
+        "tax": "TVA",
+        "total": "Total TTC",
+        "decimal": ",",
+        "months": _FRENCH_MONTHS,
+    },
+}
+
+
+def _locale_money(value: float, locale: dict[str, Any]) -> str:
+    text = f"{value:,.2f}"
+    if locale["decimal"] == ",":
+        text = text.replace(",", "\0").replace(".", ",").replace("\0", ".")
+    return text
+
+
+def _locale_date(day: date, locale: dict[str, Any]) -> str:
+    if locale["months"] is None:
+        return day.strftime("%d %b %Y")
+    return f"{day.day} {locale['months'][day.month - 1]} {day.year}"
+
+
+def _build_variant(invoice: Invoice, variant: str, path: Path, extras: dict[str, Any]) -> None:
+    """A digital invoice whose totals, wording or layout differ from the standard one."""
+    locale = _LOCALES[variant if variant in ("german", "french") else "english"]
+    styles = getSampleStyleSheet()
+    sign = -1 if variant == "credit_note" else 1
+
+    def money(value: float) -> str:
+        return _locale_money(sign * value, locale)
+
+    story: list[Any] = [
+        Paragraph(
+            invoice.vendor_name if locale["vendor"] is None else f"{locale['vendor']}: {invoice.vendor_name}",
+            styles["Heading1"],
+        )
+    ]
+    story += [
+        Paragraph("Credit Note" if variant == "credit_note" else locale["title"], styles["Heading2"]),
+        Paragraph(f"{locale['number']}: {invoice.invoice_number}", styles["BodyText"]),
+        Paragraph(f"{locale['date']}: {_locale_date(invoice.invoice_date, locale)}", styles["BodyText"]),
+        Paragraph(f"{locale['due']}: {_locale_date(invoice.due_date, locale)}", styles["BodyText"]),
+        Paragraph(f"{locale['bill']}: {invoice.bill_to}", styles["BodyText"]),
+        Paragraph(f"{locale['currency']}: {invoice.currency}", styles["BodyText"]),
+        Spacer(1, 14),
+    ]
+    if variant == "no_table":
+        story += [Paragraph("Consulting services for March 2026, fixed fee.", styles["BodyText"]), Spacer(1, 40)]
+    else:
+        rows = [
+            [
+                item["description"],
+                str(item["quantity"]),
+                _locale_money(item["unit_price"], locale),
+                money(item["amount"]),
+            ]
+            for item in invoice.items
+        ]
+        table = Table([locale["headers"], *rows], colWidths=[85 * mm, 22 * mm, 32 * mm, 32 * mm], repeatRows=1)
+        table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+                ]
+            )
+        )
+        story += [table, Spacer(1, 14)]
+
+    totals = [[locale["subtotal"], money(invoice.subtotal)]]
+    if extras.get("discount"):
+        shown = -extras["discount"] if extras["discount_negative"] else extras["discount"]
+        totals.append(["Discount", _locale_money(shown, locale)])
+    if extras.get("shipping"):
+        totals.append(["Shipping", money(invoice.shipping)])
+    if extras.get("gst_rate"):
+        totals.append([f"CGST {extras['gst_rate'] * 50:g}%", money(extras["cgst"])])
+        totals.append([f"SGST {extras['gst_rate'] * 50:g}%", money(extras["cgst"])])
+    else:
+        totals.append([locale["tax"], money(invoice.tax)])
+    totals.append([locale["total"], money(invoice.grand_total)])
+    box = Table(totals, colWidths=[40 * mm, 32 * mm], hAlign="RIGHT")
+    box.setStyle(TableStyle([("ALIGN", (1, 0), (1, -1), "RIGHT"), ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold")]))
+    story += [
+        box,
+        Spacer(1, 14),
+        Paragraph("Payment is due by the date shown. Thank you for your business.", styles["BodyText"]),
+    ]
+    SimpleDocTemplate(str(path), pagesize=A4, title="Invoice").build(story)
+
+
+def make_variant_case(variant: str, scan: bool, seed: int, folder: Path) -> Case:
+    """An invoice with extra charges, split GST, a credit note, no item table, or another language."""
+    rng = random.Random(f"variant-{variant}-{scan}-{seed}")
+    invoice = make_invoice(rng, "ruled", "digital")
+    subtotal = invoice.subtotal
+    extras: dict[str, Any] = {}
+    truth_fields: dict[str, Any] = {}
+
+    if variant == "no_table":
+        invoice.items = []
+        subtotal = round(rng.uniform(200, 5000), 2)
+        invoice.subtotal = subtotal
+        invoice.tax = round(subtotal * 0.1, 2)
+        invoice.grand_total = round(subtotal + invoice.tax, 2)
+    if variant == "shipping_discount":
+        invoice.shipping = round(rng.uniform(5, 40), 2)
+        extras["discount"] = round(subtotal * rng.choice([0.03, 0.05, 0.1]), 2)
+        extras["discount_negative"] = rng.random() < 0.5
+        extras["shipping"] = invoice.shipping
+        invoice.grand_total = round(subtotal + invoice.tax + invoice.shipping - extras["discount"], 2)
+        truth_fields["shipping"] = invoice.shipping
+        truth_fields["discount"] = -extras["discount"] if extras["discount_negative"] else extras["discount"]
+    if variant == "split_gst":
+        rate = rng.choice([0.05, 0.1, 0.18])
+        half = round(subtotal * rate / 2, 2)
+        extras.update(gst_rate=rate, cgst=half)
+        invoice.tax = round(2 * half, 2)
+        invoice.grand_total = round(subtotal + 2 * half, 2)
+        truth_fields.update(cgst=half, sgst=half)
+    if variant in ("german", "french"):
+        invoice.currency = "EUR"
+
+    invoice.printed_total = invoice.grand_total
+    sign = -1 if variant == "credit_note" else 1
+    name = f"{variant}{'+scan' if scan else ''}__{seed}"
+    pdf = folder / f"{name}.pdf"
+    if scan:
+        clean = folder / f"{name}.clean.tmp.pdf"
+        _build_variant(invoice, variant, clean, extras)
+        _scan_pdf(clean, pdf, rng, "scan_light")
+        clean.unlink()
+    else:
+        _build_variant(invoice, variant, pdf, extras)
+
+    items = [{**item, "amount": sign * item["amount"]} for item in invoice.items]
+    fields = {
+        "invoice_number": invoice.invoice_number,
+        "invoice_date": invoice.invoice_date.isoformat(),
+        "due_date": invoice.due_date.isoformat(),
+        "vendor_name": invoice.vendor_name,
+        "bill_to": invoice.bill_to,
+        "currency": invoice.currency,
+        "subtotal": sign * invoice.subtotal,
+        "tax": None if variant == "split_gst" else sign * invoice.tax,
+        "grand_total": sign * invoice.grand_total,
+        **truth_fields,
+    }
+    truth = {
+        "fields": fields,
+        "line_items": items,
+        "table_rows": [],
+        "skip_table": True,  # These cases are about totals, wording and layout, so table cells aren't scored.
+        "must_review": False,
+    }
+    case = Case(
+        name=name, style="ruled", condition=f"{variant}{'+scan' if scan else ''}", seed=seed, pdf=pdf, truth=truth
+    )
+    (folder / f"{name}.truth.json").write_text(json.dumps(truth, indent=2), encoding="utf-8")
+    return case
+
+
+def make_variant_set(
+    folder: Path, seeds: int = 1, variants: list[str] | None = None, first_seed: int = 0
+) -> list[Case]:
+    folder.mkdir(parents=True, exist_ok=True)
+    return [
+        make_variant_case(variant, scan, seed, folder)
+        for variant in (variants or VARIANTS)
+        for scan in (False, True)
+        for seed in range(first_seed, first_seed + seeds)
+    ]
 
 
 def make_benchmark_set(

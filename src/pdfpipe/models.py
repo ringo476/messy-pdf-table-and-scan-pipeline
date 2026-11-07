@@ -119,6 +119,9 @@ class FieldValue(BaseModel):
     source: str | None = None  # "text_layer", "ocr", "mixed", "llm" or "person"
     ocr_confidence: float | None = None
     checks: list[CheckResult] = Field(default_factory=list)
+    # Checks that run once, outside the check module, such as "is it visible on the page" or "have we seen this
+    # invoice before". They are copied into checks every time the checks run again.
+    extra_checks: list[CheckResult] = Field(default_factory=list, exclude=True)
     confidence: float = 0.0
     needs_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
@@ -128,6 +131,7 @@ class FieldValue(BaseModel):
     rule_notes: list[str] = Field(default_factory=list, exclude=True)  # Doubts the rules raised in step 13.
     evidence_penalty: float = Field(default=0.0, exclude=True)  # Lowers the score when evidence is indirect.
     llm_confirmed: bool = False  # Claude read the same value, which settles doubts about the reading only.
+    recovery: str | None = None  # Set when a second pass over the line produced this value.
 
 
 class LlmUsage(BaseModel):
@@ -142,6 +146,7 @@ class DocumentResult(BaseModel):
     fingerprint: str
     pipeline_version: str
     status: str  # "accepted" or "needs_review"
+    document_type: str = "invoice"  # or "credit_note"
     page_count: int
     fields: dict[str, FieldValue]
     pages: list[Page]

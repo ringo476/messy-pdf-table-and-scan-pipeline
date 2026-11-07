@@ -8,7 +8,8 @@ let refreshTimer = null;
 const FIELD_NAMES = {
   invoice_number: "Invoice number", invoice_date: "Invoice date", due_date: "Due date",
   vendor_name: "Vendor", bill_to: "Bill to", currency: "Currency",
-  subtotal: "Subtotal", tax: "Tax", grand_total: "Grand total", line_items: "Line items",
+  subtotal: "Subtotal", tax: "Tax", cgst: "CGST", sgst: "SGST", igst: "IGST",
+  shipping: "Shipping", discount: "Discount", grand_total: "Grand total", line_items: "Line items",
 };
 const STATUS_NAMES = {
   queued: "Waiting", running: "Processing", accepted: "Accepted",
@@ -101,6 +102,64 @@ async function uploadFiles(files, message) {
   }
 }
 
+// Searches the person's own accepted and reviewed invoices. The totals are added up by the server, not by Claude.
+function searchPanel() {
+  const vendor = el("input", { placeholder: "Vendor, for example Acme", "aria-label": "Vendor" });
+  const from = el("input", { type: "date", "aria-label": "From date" });
+  const to = el("input", { type: "date", "aria-label": "To date" });
+  const question = el("input", { placeholder: "Or ask: what did Acme invoice us last quarter?", "aria-label": "Question" });
+  const message = el("p", { class: "error", role: "alert" });
+  const summary = el("p", { class: "small" });
+  const rows = el("tbody");
+  const askRow = el("div", { class: "row", style: "margin-top:10px;display:none" },
+    el("div", { style: "flex:1;min-width:220px" }, question),
+    el("button", { type: "button", onclick: () => run(true) }, "Ask"),
+  );
+  api("/api/me").then((me) => { if (me.can_ask) askRow.style.display = "flex"; }).catch(() => {});
+
+  async function run(useQuestion) {
+    message.textContent = "";
+    try {
+      let result;
+      if (useQuestion) {
+        result = await api("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: question.value }),
+        });
+        const f = result.filters;
+        summary.textContent = `${result.summary} (Understood as: vendor ${f.vendor || "any"}, from ${f.date_from || "any date"}, to ${f.date_to || "any date"}.)`;
+      } else {
+        const query = new URLSearchParams();
+        if (vendor.value) query.set("vendor", vendor.value);
+        if (from.value) query.set("date_from", from.value);
+        if (to.value) query.set("date_to", to.value);
+        result = await api(`/api/invoices?${query}`);
+        summary.textContent = result.summary;
+      }
+      rows.replaceChildren(...result.invoices.map((invoice) => el("tr", { class: "link", onclick: () => showJob(invoice.job_id) },
+        el("td", {}, invoice.vendor_name),
+        el("td", {}, invoice.invoice_number ?? ""),
+        el("td", {}, invoice.invoice_date ?? ""),
+        el("td", { class: "num" }, `${invoice.grand_total ?? ""} ${invoice.currency ?? ""}`),
+      )));
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  }
+
+  return el("div", { class: "panel" },
+    el("div", { class: "row" },
+      el("div", { style: "flex:2;min-width:180px" }, vendor),
+      el("div", { style: "flex:1;min-width:140px" }, from),
+      el("div", { style: "flex:1;min-width:140px" }, to),
+      el("button", { class: "primary", type: "button", onclick: () => run(false) }, "Search"),
+    ),
+    askRow, message, summary,
+    el("div", { class: "scroll" }, el("table", {}, rows)),
+  );
+}
+
 async function showList() {
   clearRefresh();
   const input = el("input", { type: "file", accept: "application/pdf,.pdf", multiple: true, style: "display:none" });
@@ -129,6 +188,8 @@ async function showList() {
   main.replaceChildren(
     el("h2", {}, "Upload"),
     el("div", { class: "panel" }, drop, input, message),
+    el("h2", {}, "Search your invoices"),
+    searchPanel(),
     el("h2", {}, "Your documents"),
     el("div", { class: "panel scroll" },
       el("table", {},

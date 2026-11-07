@@ -74,8 +74,13 @@ _FIELD_HELP = {
     "tax": "the total tax amount, as printed",
     "grand_total": "the final amount due, as printed",
     "line_items": "every line item row, as printed",
+    "discount": "the total discount amount, as printed",
+    "shipping": "the shipping, freight or handling charge, as printed",
+    "cgst": "the central GST (CGST) amount, as printed",
+    "sgst": "the state GST (SGST) amount, as printed",
+    "igst": "the integrated GST (IGST) amount, as printed",
 }
-_MONEY_FIELDS = ("subtotal", "tax", "grand_total")
+_MONEY_FIELDS = ("subtotal", "tax", "grand_total", "discount", "shipping", "cgst", "sgst", "igst")
 _DATE_FIELDS = ("invoice_date", "due_date")
 
 

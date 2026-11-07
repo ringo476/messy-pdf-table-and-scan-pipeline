@@ -40,6 +40,26 @@ CREATE INDEX IF NOT EXISTS jobs_expired_lease ON jobs (lease_until) WHERE status
 CREATE INDEX IF NOT EXISTS jobs_by_user ON jobs (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS jobs_reuse ON jobs (fingerprint, finished_at DESC) WHERE status IN ('accepted', 'needs_review', 'reviewed');
 
+-- What the system remembers about each user's invoices. It is used to spot duplicates and numbers that don't look
+-- like the vendor's usual ones, and to answer questions such as "what did vendor X invoice us last quarter?".
+-- A record belongs to one user and is removed with its job. Only accepted and reviewed records are trusted
+-- for learning patterns and for totals. A record that still needs review is only used to spot duplicates.
+CREATE TABLE IF NOT EXISTS invoice_records (
+    job_id         UUID PRIMARY KEY REFERENCES jobs (id) ON DELETE CASCADE,
+    user_id        BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    status         TEXT NOT NULL CHECK (status IN ('accepted', 'needs_review', 'reviewed')),
+    document_type  TEXT NOT NULL DEFAULT 'invoice',
+    vendor_key     TEXT NOT NULL,
+    vendor_name    TEXT NOT NULL,
+    invoice_number TEXT,
+    invoice_date   DATE,
+    currency       TEXT,
+    grand_total    NUMERIC(18, 2),
+    saved_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS invoice_records_by_vendor ON invoice_records (user_id, vendor_key, invoice_date);
+
 -- Every change a person makes to a field. Rows are only ever added.
 CREATE TABLE IF NOT EXISTS review_log (
     id        BIGSERIAL PRIMARY KEY,

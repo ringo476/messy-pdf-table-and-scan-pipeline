@@ -51,6 +51,29 @@ def test_reads_clear_dates(text: str, expected: date) -> None:
     assert parse_date(text) == (expected, False)
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # OCR often drops the space between a month and a number.
+        ("February16, 2026", date(2026, 2, 16)),
+        ("18 Jun2026", date(2026, 6, 18)),
+        ("21Aug 2026", date(2026, 8, 21)),
+        ("5 Mar. 2026", date(2026, 3, 5)),
+        ("Sept 3, 2026", date(2026, 9, 3)),
+        # Other languages.
+        ("5. März 2026", date(2026, 3, 5)),
+        ("5 mars 2026", date(2026, 3, 5)),
+        ("5 août 2026", date(2026, 8, 5)),
+        ("5 de marzo de 2026", date(2026, 3, 5)),
+        ("5 settembre 2026", date(2026, 9, 5)),
+        ("15 Dezember 2026", date(2026, 12, 15)),
+        ("15.03.2026", date(2026, 3, 15)),
+    ],
+)
+def test_reads_dates_with_missing_spaces_and_other_languages(text: str, expected: date) -> None:
+    assert parse_date(text) == (expected, False)
+
+
 def test_marks_a_date_that_could_be_either_way_as_ambiguous() -> None:
     _, ambiguous = parse_date("03/04/2026")
     assert ambiguous is True

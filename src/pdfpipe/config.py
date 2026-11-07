@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     min_field_score: float = 0.85
     money_tolerance: float = 0.01
 
+    # Hidden-text check: compare key values from a digital page's text layer with what the page shows. It reads a
+    # few small areas with OCR, which adds about 0.4 seconds to each digital page.
+    visible_check_enabled: bool = True
+
+    # Second pass (step 15b): read failed fields on scans again in other ways. It uses only the local models.
+    recovery_enabled: bool = True
+    recovery_max_fields: int = 6
+    recovery_max_seconds: float = 25.0
+
     # Claude (step 16): off unless explicitly enabled and a key is present
     llm_enabled: bool = False
     anthropic_api_key: str | None = None

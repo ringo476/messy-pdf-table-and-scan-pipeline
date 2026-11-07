@@ -15,7 +15,7 @@ from reportlab.pdfgen import canvas
 
 from pdfpipe import __version__
 from pdfpipe.config import Settings
-from pdfpipe.service import auth, db
+from pdfpipe.service import auth, db, worker
 from pdfpipe.service.app import create_app
 
 DATABASE_URL = os.environ.get("PDFPIPE_TEST_DATABASE_URL")
@@ -330,6 +330,214 @@ class TestReview:
         client = logged_in(app_client.app, connection, "sam")
         job_id = self.finished_job(client, connection)
         assert client.post(f"/api/jobs/{job_id}/review", json={"approve": ["nope"]}).status_code == 422
+
+
+def stored_invoice(
+    connection: db.Connection,
+    client: TestClient,
+    text: str,
+    number: str,
+    *,
+    vendor: str = "Acme Office Supply",
+    total: str = "110.00",
+    date: str = "2026-03-05",
+    status: str = "accepted",
+    currency: str = "USD",
+    document_type: str = "invoice",
+) -> uuid.UUID:
+    """Uploads a file, finishes its job with the given values, and remembers it, as a worker does."""
+    job_id = uuid.UUID(upload(client, text).json()["id"])
+    connection.execute("UPDATE jobs SET status = 'running', worker = 'w' WHERE id = %s", (job_id,))
+
+    def field(value: Any) -> dict[str, Any]:
+        return {"value": value, "needs_review": False, "confidence": 0.97, "review_reasons": [], "checks": []}
+
+    machine = {
+        **machine_result(status),
+        "document_type": document_type,
+        "fields": {
+            "vendor_name": field(vendor),
+            "invoice_number": field(number),
+            "invoice_date": field(date),
+            "currency": field(currency),
+            "grand_total": field(total),
+        },
+    }
+    machine = worker.check_against_history(
+        connection, db.get_job(connection, job_id, owner_of(connection, job_id)), machine
+    )  # type: ignore[arg-type]
+    assert db.complete_job(connection, job_id, "w", machine)
+    job = db.get_job(connection, job_id, owner_of(connection, job_id))
+    assert job is not None
+    worker.remember(connection, job, machine)
+    return job_id
+
+
+def owner_of(connection: db.Connection, job_id: uuid.UUID) -> int:
+    row = connection.execute("SELECT user_id FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert row is not None
+    return int(row["user_id"])
+
+
+def status_of(connection: db.Connection, job_id: uuid.UUID) -> str:
+    row = connection.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert row is not None
+    return str(row["status"])
+
+
+class TestInvoiceMemory:
+    def test_a_second_copy_of_an_invoice_is_flagged(self, app_client: TestClient, connection: db.Connection) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        stored_invoice(connection, client, "first", "INV-1001")
+        second = stored_invoice(connection, client, "second", "INV-1001")
+        assert status_of(connection, second) == "needs_review"
+        result = client.get(f"/api/jobs/{second}").json()["result"]["machine"]
+        assert result["history_checked"] is True
+        assert result["fields"]["invoice_number"]["needs_review"] is True
+
+    def test_a_different_number_is_not_flagged(self, app_client: TestClient, connection: db.Connection) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        stored_invoice(connection, client, "first", "INV-1001")
+        assert status_of(connection, stored_invoice(connection, client, "second", "INV-1002")) == "accepted"
+
+    def test_another_users_invoices_are_never_used(self, app_client: TestClient, connection: db.Connection) -> None:
+        first = logged_in(app_client.app, connection, "first")
+        second = logged_in(app_client.app, connection, "second")
+        stored_invoice(connection, first, "same-a", "INV-1001")
+        job = stored_invoice(connection, second, "same-b", "INV-1001")
+        assert status_of(connection, job) == "accepted"
+
+    def test_a_number_that_breaks_the_vendors_pattern_is_flagged(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        for index in range(4):
+            stored_invoice(connection, client, f"doc{index}", f"INV-100{index}")
+        odd = stored_invoice(connection, client, "odd", "INV-l005")
+        assert status_of(connection, odd) == "needs_review"
+
+    def test_a_vendor_name_with_a_small_ocr_slip_still_matches(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        stored_invoice(connection, client, "first", "INV-1001")
+        slip = stored_invoice(connection, client, "second", "INV-1001", vendor="Acme Offlce Supply Ltd")
+        assert status_of(connection, slip) == "needs_review"
+
+    def test_deleting_a_job_removes_what_was_remembered(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        job_id = stored_invoice(connection, client, "first", "INV-1001")
+        assert client.delete(f"/api/jobs/{job_id}").status_code == 204
+        row = connection.execute("SELECT count(*) AS n FROM invoice_records").fetchone()
+        assert row is not None
+        assert row["n"] == 0
+
+    def test_finishing_a_review_remembers_the_corrected_values(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        job_id = stored_invoice(connection, client, "first", "INV-1001", status="needs_review")
+        assert client.get("/api/invoices").json()["invoices"] == []  # not trusted until a person has confirmed it
+        reply = client.post(
+            f"/api/jobs/{job_id}/review",
+            json={"edits": [{"name": "grand_total", "value": "125.00"}], "finish": True},
+        )
+        assert reply.status_code == 200
+        found = client.get("/api/invoices").json()["invoices"]
+        assert [(row["invoice_number"], row["grand_total"]) for row in found] == [("INV-1001", "125.00")]
+
+
+class TestInvoiceSearch:
+    def fill(self, connection: db.Connection, client: TestClient) -> None:
+        stored_invoice(connection, client, "a", "A-1", total="100.10", date="2026-07-10")
+        stored_invoice(connection, client, "b", "A-2", total="50.05", date="2026-08-20")
+        stored_invoice(connection, client, "c", "A-3", total="900.00", date="2026-01-02")
+        stored_invoice(connection, client, "d", "O-1", total="20.00", date="2026-08-01", vendor="Orbit Systems Inc")
+        stored_invoice(connection, client, "e", "A-9", total="10.00", date="2026-08-21", document_type="credit_note")
+        stored_invoice(connection, client, "f", "A-8", total="777.00", date="2026-08-22", status="needs_review")
+
+    def test_a_vendor_and_date_range_are_added_up_by_code(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        self.fill(connection, client)
+        reply = client.get(
+            "/api/invoices", params={"vendor": "acme", "date_from": "2026-07-01", "date_to": "2026-09-30"}
+        )
+        body = reply.json()
+        assert [row["invoice_number"] for row in body["invoices"]] == ["A-1", "A-2", "A-9"]
+        assert body["totals"] == {"USD": "140.15"}  # 100.10 + 50.05 - 10.00 credit note
+        assert "3 invoices" in body["summary"]
+
+    def test_an_invoice_still_waiting_for_review_is_not_counted(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        self.fill(connection, client)
+        numbers = [row["invoice_number"] for row in client.get("/api/invoices").json()["invoices"]]
+        assert "A-8" not in numbers
+
+    def test_every_vendor_when_none_is_named(self, app_client: TestClient, connection: db.Connection) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        self.fill(connection, client)
+        assert len(client.get("/api/invoices").json()["invoices"]) == 5
+
+    def test_nobody_can_search_another_users_invoices(self, app_client: TestClient, connection: db.Connection) -> None:
+        owner = logged_in(app_client.app, connection, "owner")
+        other = logged_in(app_client.app, connection, "other")
+        self.fill(connection, owner)
+        body = other.get("/api/invoices", params={"vendor": "acme"}).json()
+        assert body["invoices"] == []
+        assert body["totals"] == {}
+
+    def test_search_needs_a_login(self, app_client: TestClient) -> None:
+        assert app_client.get("/api/invoices").status_code == 401
+        assert app_client.post("/api/ask", json={"question": "x"}).status_code == 401
+
+
+class TestAsking:
+    def asking(self, test_settings: Settings, reply: Any) -> Any:
+        from test_history import FakeClaude
+
+        return TestClient(create_app(test_settings, claude_client=FakeClaude(reply)))
+
+    def test_a_question_is_answered_from_the_users_own_invoices(
+        self, test_settings: Settings, connection: db.Connection
+    ) -> None:
+        reply = {"vendor": "Acme", "date_from": "2026-07-01", "date_to": "2026-09-30"}
+        with self.asking(test_settings, reply) as base:
+            client = logged_in(base.app, connection, "sam")
+            TestInvoiceSearch().fill(connection, client)
+            body = client.post("/api/ask", json={"question": "What did Acme invoice us last quarter?"}).json()
+        assert body["totals"] == {"USD": "140.15"}
+        assert body["filters"]["vendor"] == "Acme"
+        assert "totalling 140.15 USD" in body["summary"]
+
+    def test_a_question_never_reaches_another_users_invoices(
+        self, test_settings: Settings, connection: db.Connection
+    ) -> None:
+        reply = {"vendor": "Acme", "date_from": None, "date_to": None}
+        with self.asking(test_settings, reply) as base:
+            owner = logged_in(base.app, connection, "owner")
+            other = logged_in(base.app, connection, "other")
+            TestInvoiceSearch().fill(connection, owner)
+            assert other.post("/api/ask", json={"question": "Acme?"}).json()["invoices"] == []
+
+    def test_a_question_that_cannot_be_understood_is_refused(
+        self, test_settings: Settings, connection: db.Connection
+    ) -> None:
+        with self.asking(test_settings, ["nonsense"]) as base:
+            client = logged_in(base.app, connection, "sam")
+            assert client.post("/api/ask", json={"question": "hmm"}).status_code == 422
+
+    def test_without_claude_the_filters_still_work_and_asking_says_why(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        assert client.get("/api/me").json()["can_ask"] is False
+        assert client.post("/api/ask", json={"question": "anything"}).status_code == 503
 
 
 class TestClaudeSpend:

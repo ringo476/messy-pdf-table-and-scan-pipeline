@@ -18,8 +18,9 @@ from ..config import Settings
 from ..engines import Engines
 from ..models import DocumentResult
 from ..process import process_pdf
-from .synth import CONDITIONS, STYLES, Case, make_benchmark_set
+from .synth import CONDITIONS, STYLES, VARIANTS, Case, make_benchmark_set, make_variant_set
 
+EXTRA_FIELD_NAMES = ["discount", "shipping", "cgst", "sgst"]
 FIELD_NAMES = [
     "invoice_number",
     "invoice_date",
@@ -42,6 +43,8 @@ def _same(got: Any, want: Any) -> bool:
 
 
 def _items_correct(got: list[dict[str, Any]] | None, want: list[dict[str, Any]]) -> bool:
+    if not want:  # An invoice with no item table is right only if no items were invented.
+        return not got
     if not got or len(got) != len(want):
         return False
     return all(
@@ -85,6 +88,8 @@ class Tally:
     seconds: list[float] = field(default_factory=list)
     pages: int = 0
     errors: int = 0
+    fields_recovered: int = 0  # Fields the second pass fixed by reading the line again.
+    recovered_wrong: int = 0  # Of those, how many ended up with a wrong value.
 
     def row(self) -> dict[str, Any]:
         precision = self.matched / self.found if self.found else 0.0
@@ -104,6 +109,8 @@ class Tally:
             if per_page
             else None,
             "crashes": self.errors,
+            "fields_fixed_by_second_pass": self.fields_recovered,
+            "second_pass_wrong": self.recovered_wrong,
         }
 
 
@@ -133,14 +140,19 @@ def score_case(case: Case, result: DocumentResult, tally: Tally, failures: list[
             tally.must_review_missed += 1
             failures.append({"case": case.name, "problem": "accepted a document that must be reviewed"})
 
-    comparisons = [(name, result.fields[name], truth["fields"][name], _same) for name in FIELD_NAMES]
+    extra_names = [name for name in EXTRA_FIELD_NAMES if name in truth["fields"]]
+    comparisons = [(name, result.fields[name], truth["fields"][name], _same) for name in [*FIELD_NAMES, *extra_names]]
     comparisons.append(("line_items", result.fields["line_items"], truth["line_items"], _items_correct))
     for name, value, want, compare in comparisons:
         correct = compare(value.value, want)
         tally.fields_total += 1
         tally.fields_correct += correct
         tally.fields_reviewed += value.needs_review
-        accepted = not value.needs_review and value.value not in (None, "", [])
+        if value.recovery:
+            tally.fields_recovered += 1
+            tally.recovered_wrong += not correct
+        # An empty value that is accepted is only right if nothing should be there, like a missing item table.
+        accepted = not value.needs_review and (value.value not in (None, "", []) or want in (None, []))
         tally.fields_accepted += accepted
         if accepted and not correct:
             tally.silent_errors += 1
@@ -165,21 +177,30 @@ def score_case(case: Case, result: DocumentResult, tally: Tally, failures: list[
                 }
             )
 
-    matched, found, expected = table_cell_scores(_best_table(result, truth["table_rows"]), truth["table_rows"])
-    tally.matched += matched
-    tally.found += found
-    tally.expected += expected
+    if not truth.get("skip_table"):
+        matched, found, expected = table_cell_scores(_best_table(result, truth["table_rows"]), truth["table_rows"])
+        tally.matched += matched
+        tally.found += found
+        tally.expected += expected
 
 
 def run(
-    folder: Path, seeds: int, styles: list[str] | None, conditions: list[str] | None, first_seed: int = 0
+    folder: Path,
+    seeds: int,
+    styles: list[str] | None,
+    conditions: list[str] | None,
+    first_seed: int = 0,
+    variants: list[str] | None = None,
 ) -> dict[str, Any]:
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     engines = Engines(settings)
     engines.warm_up()
-    cases = make_benchmark_set(
-        folder / "documents", seeds=seeds, styles=styles, conditions=conditions, first_seed=first_seed
-    )
+    if variants is not None:
+        cases = make_variant_set(folder / "documents", seeds=seeds, variants=variants or None, first_seed=first_seed)
+    else:
+        cases = make_benchmark_set(
+            folder / "documents", seeds=seeds, styles=styles, conditions=conditions, first_seed=first_seed
+        )
 
     overall = Tally()
     by_condition: dict[str, Tally] = defaultdict(Tally)
@@ -215,8 +236,14 @@ def main() -> None:
     parser.add_argument("--first-seed", type=int, default=0, help="use new seeds to test on unseen documents")
     parser.add_argument("--styles", nargs="*", choices=STYLES)
     parser.add_argument("--conditions", nargs="*", choices=CONDITIONS)
+    parser.add_argument(
+        "--variants",
+        nargs="*",
+        choices=VARIANTS,
+        help="run the invoice variants (extra charges, split GST, credit notes, no table, other languages) instead",
+    )
     args = parser.parse_args()
-    report = run(args.out, args.seeds, args.styles, args.conditions, args.first_seed)
+    report = run(args.out, args.seeds, args.styles, args.conditions, args.first_seed, args.variants)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({key: report[key] for key in ("total_seconds", "overall", "by_condition", "by_style")}, indent=2))

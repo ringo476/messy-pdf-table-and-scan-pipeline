@@ -2,7 +2,8 @@
 
 import json
 import uuid
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from importlib import resources
 from typing import Any
 
@@ -11,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from ..config import Settings
+from . import history
 
 Connection = psycopg.Connection[dict[str, Any]]
 
@@ -79,6 +81,108 @@ def llm_spend_today(connection: Connection) -> float:
            WHERE finished_at >= date_trunc('day', now()) AND reused_from IS NULL AND result IS NOT NULL"""
     ).fetchone()
     return float(row["spent"]) if row else 0.0
+
+
+def record_invoice(
+    connection: Connection,
+    job_id: uuid.UUID,
+    user_id: int,
+    status: str,
+    machine: dict[str, Any],
+    fields: dict[str, Any],
+) -> None:
+    """Remembers a job's key values, so later invoices can be checked against it and searched.
+
+    fields is the machine's fields, or the person's corrected ones. With no vendor there is nothing to remember.
+    """
+
+    def value(name: str) -> Any:
+        return (fields.get(name) or {}).get("value")
+
+    vendor = value("vendor_name")
+    if not vendor:
+        connection.execute("DELETE FROM invoice_records WHERE job_id = %s", (job_id,))
+        return
+    try:
+        invoice_date = date.fromisoformat(str(value("invoice_date"))) if value("invoice_date") else None
+    except ValueError:
+        invoice_date = None
+    try:
+        total = Decimal(str(value("grand_total"))) if value("grand_total") not in (None, "") else None
+    except InvalidOperation:
+        total = None
+    connection.execute(
+        """INSERT INTO invoice_records
+             (job_id, user_id, status, document_type, vendor_key, vendor_name, invoice_number, invoice_date,
+              currency, grand_total)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+           ON CONFLICT (job_id) DO UPDATE SET
+             status = EXCLUDED.status, document_type = EXCLUDED.document_type, vendor_key = EXCLUDED.vendor_key,
+             vendor_name = EXCLUDED.vendor_name, invoice_number = EXCLUDED.invoice_number,
+             invoice_date = EXCLUDED.invoice_date, currency = EXCLUDED.currency,
+             grand_total = EXCLUDED.grand_total, saved_at = now()""",
+        (
+            job_id,
+            user_id,
+            status,
+            machine.get("document_type", "invoice"),
+            history.vendor_key(str(vendor)),
+            str(vendor),
+            str(value("invoice_number")) if value("invoice_number") else None,
+            invoice_date,
+            str(value("currency")) if value("currency") else None,
+            total,
+        ),
+    )
+
+
+def _matching_vendor_keys(connection: Connection, user_id: int, wanted: str, loose: bool) -> list[str]:
+    """This user's stored vendor keys that mean the same vendor. loose also accepts a partial name, for searches."""
+    keys = [
+        row["vendor_key"]
+        for row in connection.execute(
+            "SELECT DISTINCT vendor_key FROM invoice_records WHERE user_id = %s", (user_id,)
+        ).fetchall()
+    ]
+    return [key for key in keys if history.same_vendor(wanted, key) or (loose and wanted and wanted in key)]
+
+
+def vendor_records(
+    connection: Connection, user_id: int, vendor_name: str, exclude_job: uuid.UUID
+) -> list[dict[str, Any]]:
+    """This user's earlier records for the same vendor. Never another user's."""
+    keys = _matching_vendor_keys(connection, user_id, history.vendor_key(vendor_name), loose=False)
+    if not keys:
+        return []
+    return connection.execute(
+        """SELECT job_id, status, document_type, invoice_number, invoice_date, currency, grand_total
+           FROM invoice_records
+           WHERE user_id = %s AND vendor_key = ANY(%s) AND job_id <> %s""",
+        (user_id, keys, exclude_job),
+    ).fetchall()
+
+
+def search_invoices(
+    connection: Connection, user_id: int, vendor: str | None, date_from: date | None, date_to: date | None
+) -> list[dict[str, Any]]:
+    """Trusted records (accepted or reviewed) for one user, optionally for one vendor and a date range."""
+    sql = """SELECT job_id, vendor_name, invoice_number, invoice_date, currency, grand_total, document_type, status
+             FROM invoice_records WHERE user_id = %s AND status IN ('accepted', 'reviewed')"""
+    parameters: list[Any] = [user_id]
+    if vendor and vendor.strip():
+        keys = _matching_vendor_keys(connection, user_id, history.vendor_key(vendor), loose=True)
+        if not keys:
+            return []
+        sql += " AND vendor_key = ANY(%s)"
+        parameters.append(keys)
+    if date_from:
+        sql += " AND invoice_date >= %s"
+        parameters.append(date_from)
+    if date_to:
+        sql += " AND invoice_date <= %s"
+        parameters.append(date_to)
+    sql += " ORDER BY invoice_date NULLS LAST, saved_at LIMIT 500"
+    return connection.execute(sql, parameters).fetchall()
 
 
 def finish_with_reused_result(
