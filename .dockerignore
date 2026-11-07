@@ -1,0 +1,8 @@
+.venv
+.git
+.env
+data
+eval_out
+tests
+**/__pycache__
+*.md

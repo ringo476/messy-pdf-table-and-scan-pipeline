@@ -1,0 +1,65 @@
+name: pdfpipe
+
+x-app: &app
+  build: .
+  image: pdfpipe:local
+  restart: unless-stopped
+  environment: &app-env
+    PDFPIPE_DATABASE_URL: postgresql://pdfpipe:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the .env file}@db:5432/pdfpipe
+    PDFPIPE_LLM_ENABLED: ${PDFPIPE_LLM_ENABLED:-false}
+    PDFPIPE_ANTHROPIC_API_KEY: ${PDFPIPE_ANTHROPIC_API_KEY:-}
+  volumes:
+    - data:/data
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pdfpipe
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the .env file}
+      POSTGRES_DB: pdfpipe
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Reachable from this PC only, for tests and maintenance. Other machines can't connect to it.
+    ports:
+      - "127.0.0.1:${PDFPIPE_DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdfpipe -d pdfpipe"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web:
+    <<: *app
+    command: ["uvicorn", "pdfpipe.service.app:app_factory", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      # Set PDFPIPE_BIND=0.0.0.0 in .env to let other machines on your network connect.
+      - "${PDFPIPE_BIND:-127.0.0.1}:${PDFPIPE_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "pdfpipe.service.worker"]
+    environment:
+      <<: *app-env
+      # Three workers with two threads each use the PC's six cores without fighting over them.
+      PDFPIPE_MODEL_THREADS: "2"
+    deploy:
+      replicas: ${PDFPIPE_WORKERS:-3}
+    # Long documents shouldn't be able to run the whole PC out of memory.
+    mem_limit: ${PDFPIPE_WORKER_MEMORY:-2500m}
+    # Gives a worker time to stop cleanly. Anything unfinished is picked up again through its lease.
+    stop_grace_period: 20s
+
+volumes:
+  data:
+  pgdata:
