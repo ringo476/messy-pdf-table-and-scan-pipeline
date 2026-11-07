@@ -74,7 +74,7 @@ def find_reusable(
 
 
 def llm_spend_today(connection: Connection) -> float:
-    """What Claude has cost today, in US dollars. Results copied from an earlier job cost nothing new."""
+    """What the language model has cost today, in US dollars. Results copied from an earlier job cost nothing new."""
     row = connection.execute(
         """SELECT coalesce(sum((result->'machine'->'llm'->>'estimated_cost_usd')::float8), 0) AS spent
            FROM jobs

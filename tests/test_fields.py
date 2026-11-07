@@ -378,6 +378,28 @@ class TestVendorGuessInUnknownLanguages:
         assert rules.extract_fields(document)["vendor_name"].value == "Acme Ltd"
 
 
+class TestVendorGuessIgnoresTables:
+    """Found by a real model run: a Dutch invoice's table header 'Omschrijving' was guessed as the vendor."""
+
+    def test_a_table_header_is_never_guessed_as_the_vendor(self) -> None:
+        from conftest import line_of
+
+        document = document_of([("Totaal 110,00", 700, 980)])
+        header = line_of("Omschrijving Aantal Prijs Bedrag", 100, 60)
+        document.pages[0].regions.append(Region(type=RegionType.TABLE, bbox=(90, 50, 600, 90), score=0.9, words=header))
+        assert rules.extract_fields(document)["vendor_name"].value is None
+
+    def test_a_company_name_above_the_table_is_still_found(self) -> None:
+        from conftest import line_of
+
+        document = document_of([("Acme Kantoor BV", 100, 30), ("Totaal 110,00", 700, 980)])
+        header = line_of("Omschrijving Aantal Prijs Bedrag", 100, 90)
+        document.pages[0].regions.append(
+            Region(type=RegionType.TABLE, bbox=(90, 80, 600, 120), score=0.9, words=header)
+        )
+        assert rules.extract_fields(document)["vendor_name"].value == "Acme Kantoor BV"
+
+
 class TestCreditNotes:
     LINES = [
         ("Credit Note", 100, 20),

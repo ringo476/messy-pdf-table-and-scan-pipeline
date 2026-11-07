@@ -55,7 +55,9 @@ class Settings(BaseSettings):
     openai_first_model: str = "gpt-4o-mini"
     # A different model for a second, independent reading. With none set, a value that has no arithmetic to check
     # it (an invoice number, a date, a name) is only ever suggested to a person, never filled in by the model.
-    openai_second_model: str | None = None
+    # gpt-5-nano is OpenAI's cheapest model on its pricing page. In real runs on generated Dutch invoices it gave the
+    # second opinion that let the dates, names and numbers be filled in, at a fraction of a cent per document.
+    openai_second_model: str | None = "gpt-5-nano"
     openai_image_detail: str = "high"  # "low" is cheaper but reads small digits worse.
     anthropic_api_key: str | None = None
     llm_first_model: str = "claude-haiku-5-5"
@@ -66,7 +68,7 @@ class Settings(BaseSettings):
     # Spending limits. Once a limit is reached, the remaining failed fields simply go to a person.
     llm_max_cost_per_document_usd: float = 0.25
     llm_daily_budget_usd: float = 5.0
-    # After this many failed calls in a row, this worker stops calling Claude for a while.
+    # After this many failed calls in a row, this worker stops calling the language model for a while.
     llm_pause_after_failures: int = 5
     llm_pause_seconds: int = 300
 

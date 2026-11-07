@@ -106,6 +106,14 @@ These come from generated documents only. **Accuracy on real invoices has not be
 - One name with a dropped space on a scanned credit note was caught by the new check and sent to review.
 - Spanish and Italian labels are only unit-tested. No generated Spanish or Italian documents exist.
 
+**With the language model on (OpenAI, real calls)**, on generated invoices written in Dutch (which the label rules can't read) and on "photographed" pages (tilted, unevenly lit, blurred). The first reader was `gpt-4o-mini` and the second opinion came from `gpt-5-nano`. The same documents were run with the model off, to compare.
+
+- *Run 1, 6 documents (seeds 800 and 801).* Dutch invoices: correct values went from 10% to 85% (digital) and 70% (scans), and fields sent to review fell from 50% to 15% and 20%. It exposed three problems that I then fixed: Dutch month names weren't understood, a message hard-coded the name of another provider, and a table header (`Omschrijving`) was guessed as the vendor.
+- *Run 2, 9 new documents (seeds 900 to 902), after those fixes.* Dutch invoices, digital and scanned: correct values went from 10% to **100%**, fields sent to review fell from 50% to 0%, and all 6 were accepted with no review. The model filled in 54 fields, and none was wrong. Photographed pages were unchanged at 96.7%.
+- **Cost: $0.027 for those 9 documents**, about 0.3 cents each. Time: about 9.9 s per page at the median with the model, against 1 to 4 s without it.
+- **One silent error, with or without the model:** on a photographed page, OCR read the buyer's name as `Hilview School` for `Hillview School`, with high confidence, and it was accepted. A name read by OCR has no arithmetic to check it. The model is only asked about fields that failed a check, so it never saw this one.
+- These are tiny samples of generated documents. They show that the approach works end to end and what it costs. They don't show how accurate it would be on real invoices.
+
 Two cautions about these numbers. The first standard set I used (seeds 100 to 102) is no longer a fair test, because I used its failures to fix the date reading, the vendor guess, and the second pass. And each time a check is added after looking at failures, the set it was tuned on stops being unseen, so run 1 is no longer an unseen set either. Run 2 is the one to trust, until the next change.
 
 Four users uploading at the same moment (3 workers, 6 cores):
@@ -134,7 +142,7 @@ python scripts/load_test.py --db-url postgresql://pdfpipe:PASSWORD@127.0.0.1:543
 ## Known limits
 
 - **Not tested on real documents.** This is the biggest gap. Run real invoices through it before trusting the numbers above.
-- **The language model step has never made a real call.** It has only been tested with fake clients, so its real accuracy and cost are unknown. The OpenAI model name and prices come from OpenAI's documentation and pricing page, not from a real run.
+- **The language model step has only had small real runs.** It was run for real on 15 generated documents (see the results above). That is far too few to know its real accuracy, and none of them were real invoices. Its cost estimate and the prices in the code are from OpenAI's pricing page and one small run. The second model (`gpt-5-nano`) was only tried in those runs, and it is not the default.
 - **With the model on, invoices leave your PC.** The text and images of failed fields are sent to OpenAI (or Anthropic, if chosen). Without it, nothing does.
 - **Invoices only.** The field rules, labels, and checks are written for invoices and credit notes. Other document types get their text and tables, but no meaningful fields.
 - **Labels in other languages.** English, German, French, Spanish and Italian are read. A label in any other language is not found, and the field goes to review. Spanish and Italian have unit tests only.
@@ -144,7 +152,7 @@ python scripts/load_test.py --db-url postgresql://pdfpipe:PASSWORD@127.0.0.1:543
 - **The hidden-text check covers six fields** (the invoice number, both dates, subtotal, tax and total), and digital pages only. A different value hidden in the vendor name or an item description isn't compared. It also adds about 0.4 s to each digital page. Set `PDFPIPE_VISIBLE_CHECK_ENABLED=false` to turn it off.
 - **The second pass is a bounded retry, not an AI agent.** It uses only the local OCR, on scanned pages, and keeps a new reading only when every check agrees. The language model step is the other reader.
 - **Memory of earlier invoices is only as good as what it learned.** It needs three earlier invoices from a vendor before it judges a number's shape. It learns from invoices that were accepted, and a wrong value that slipped through would teach a wrong pattern. It can't catch a wrong digit inside the right pattern, such as `INV-1048` for `INV-1042`.
-- **Asking in plain words needs the language model on,** and those small calls are not counted against the daily budget. It has only been tested with a fake client.
+- **Asking in plain words needs the language model on,** and those small calls are not counted against the daily budget. It has only been tested with a fake client, and has not made a real call.
 - **Without the model, an invoice in a language the labels don't cover** has nothing read from it and is sent to review in full. A vendor guessed from the page top is never accepted on such a page.
 - **An amount like `1.234` is left for a person.** It is 1234 in some countries and 1.234 in others, so it isn't guessed. European invoices with whole amounts written like `1.250` therefore go to review.
 - **Thresholds are hand-set.** The 0.85 minimum and the score formula haven't been calibrated against real error rates.
@@ -172,7 +180,7 @@ PDFPIPE_OPENAI_API_KEY=your-key
 The model and the rules around it:
 
 - **A cheap model reads the failed fields.** The default is `gpt-4o-mini`, which accepts images and returns JSON in a fixed shape. Change it with `PDFPIPE_OPENAI_FIRST_MODEL`. Page images are sent at high detail so small digits can be read. `PDFPIPE_OPENAI_IMAGE_DETAIL=low` is cheaper and reads worse.
-- **A second, different model gives a second opinion.** Set `PDFPIPE_OPENAI_SECOND_MODEL`, for example to a different small model. A value for a field with no arithmetic to check it (the invoice number, a date, a name, the currency) is filled in only when two different models read the same printed value. With no second model set, or if they disagree, the value is only a suggestion for a person. Turn this off with `PDFPIPE_LLM_REQUIRE_AGREEMENT=false`.
+- **A second, different model gives a second opinion.** The default is `gpt-5-nano`, OpenAI's cheapest model on its pricing page. Change it with `PDFPIPE_OPENAI_SECOND_MODEL`, or set it to nothing to use none. A value for a field with no arithmetic to check it (the invoice number, a date, a name, the currency) is filled in only when two different models read the same printed value. With no second model, or if they disagree, the value is only a suggestion for a person. Turn this off with `PDFPIPE_LLM_REQUIRE_AGREEMENT=false`. In a live test through the web app with no second model, a Dutch invoice's amounts were filled in, and its number, dates and names were left for a person with suggestions.
 - **An invoice that the rules can't read at all** (three or more of the invoice number, date, vendor and total are empty) has every empty field requested, not only the failed ones.
 - **A money value needs no second model**, because the arithmetic checks it. A wrong total from the model is stopped by the sum check.
 - **A value is only used if it is printed on the page** as a whole token, and the same checks re-run on every answer.
@@ -191,7 +199,7 @@ The cost is worked out from the tokens each reply reports, using the prices in [
 To measure it on generated documents before trusting it, run this. It sends data to OpenAI and costs a small amount of money.
 
 ```bash
-python -m pdfpipe.evaluation.benchmark --out eval_out/model --seeds 3 --first-seed 600 --variants dutch photo --llm
+python -m pdfpipe.evaluation.benchmark --out eval_out/model --seeds 3 --first-seed 1000 --variants dutch photo --llm
 ```
 
 Claude is still available. Set `PDFPIPE_LLM_PROVIDER=anthropic` and `PDFPIPE_ANTHROPIC_API_KEY`. Only the provider you choose is ever called. Claude's Sonnet requests use Anthropic's server-side refusal fallback.

@@ -323,7 +323,7 @@ def _check_ambiguity(fields: dict[str, FieldValue]) -> None:
                 field,
                 "second_reader_agrees",
                 False,
-                f"Claude read this as '{field.suggested_value}', so a person needs to confirm it",
+                f"The language model read this as '{field.suggested_value}', so a person needs to confirm it",
             )
         if field.alternatives:
             _add(

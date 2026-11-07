@@ -1,9 +1,9 @@
 """Answers questions about a user's own invoices, such as "what did Acme invoice us last quarter?".
 
-Claude only turns the question into three search filters: a vendor and a date range. The search is a plain database
-query over the user's own accepted and reviewed invoices, and the numbers in the answer are added up by code. Claude
-never sees the invoices and never writes the answer, so it can't invent a figure. The filters it chose are shown with
-the answer, so anyone can see how the question was understood.
+The language model only turns the question into three search filters: a vendor and a date range. The search is a
+plain database query over the user's own accepted and reviewed invoices, and the numbers in the answer are added up
+by code. The model never sees the invoices and never writes the answer, so it can't invent a figure. The filters it
+chose are shown with the answer, so anyone can see how the question was understood.
 """
 
 import logging

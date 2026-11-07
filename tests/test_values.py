@@ -67,6 +67,10 @@ def test_reads_clear_dates(text: str, expected: date) -> None:
         ("5 de marzo de 2026", date(2026, 3, 5)),
         ("5 settembre 2026", date(2026, 9, 5)),
         ("15 Dezember 2026", date(2026, 12, 15)),
+        ("31 maart 2026", date(2026, 3, 31)),
+        ("14 februari 2026", date(2026, 2, 14)),
+        ("5 mei 2026", date(2026, 5, 5)),
+        ("9 augustus 2026", date(2026, 8, 9)),
         ("15.03.2026", date(2026, 3, 15)),
     ],
 )

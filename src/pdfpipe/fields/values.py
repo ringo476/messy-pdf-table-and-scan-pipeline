@@ -57,18 +57,18 @@ def parse_money(text: str) -> Decimal | None:
 
 
 _MONTH_NAMES = {
-    "jan": ("jan", "januar", "janvier", "enero", "gennaio", "janeiro"),
-    "feb": ("feb", "februar", "fevrier", "febrero", "febbraio", "fevereiro"),
-    "mar": ("mar", "marz", "maerz", "mrz", "mars", "marzo", "marco"),
+    "jan": ("jan", "januar", "janvier", "enero", "gennaio", "janeiro", "januari"),
+    "feb": ("feb", "februar", "fevrier", "febrero", "febbraio", "fevereiro", "februari"),
+    "mar": ("mar", "marz", "maerz", "mrz", "mars", "marzo", "marco", "maart"),
     "apr": ("apr", "avril", "abril", "aprile"),
-    "may": ("may", "mai", "mayo", "maggio", "maio"),
+    "may": ("may", "mai", "mayo", "maggio", "maio", "mei"),
     "jun": ("jun", "juni", "juin", "junio", "giugno", "junho"),
     "jul": ("jul", "juli", "juillet", "julio", "luglio", "julho"),
-    "aug": ("aug", "august", "aout", "agosto"),
+    "aug": ("aug", "august", "aout", "agosto", "augustus"),
     "sep": ("sep", "sept", "september", "septembre", "septiembre", "setiembre", "settembre", "setembro"),
     "oct": ("oct", "okt", "oktober", "octobre", "octubre", "ottobre", "outubro"),
     "nov": ("nov", "november", "novembre", "noviembre", "novembro"),
-    "dec": ("dec", "dez", "dezember", "decembre", "diciembre", "dicembre", "dezembro"),
+    "dec": ("dec", "dez", "dezember", "decembre", "diciembre", "dicembre", "dezembro", "december"),
 }
 # English months aren't remapped, so "March" stays as it is. Only other languages need translating.
 _MONTH_LOOKUP = {word: english for english, words in _MONTH_NAMES.items() for word in words}

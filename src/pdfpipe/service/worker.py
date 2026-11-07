@@ -89,7 +89,7 @@ class Extractor:
         self, pdf_path: Path, output_dir: Path, on_tick: Any, llm_budget_usd: float | None = None
     ) -> tuple[str, Any]:
         """Runs one job. on_tick is called regularly, and returning False from it cancels the job.
-        llm_budget_usd is the most Claude may cost on this document, or None for no extra limit.
+        llm_budget_usd is the most the language model may cost on this document, or None for no extra limit.
 
         A busy child must never be reused. If this method exits abnormally while the child is still working,
         the child's late reply would otherwise be read as the next job's result, and could show one user's
@@ -184,7 +184,7 @@ def handle_job(
 
     budget = None
     if settings.llm_enabled:
-        # What is left of today's Claude budget, shared by all workers through the database.
+        # What is left of today's language model budget, shared by all workers through the database.
         budget = max(0.0, settings.llm_daily_budget_usd - db.llm_spend_today(connection))
     status, value = extractor.run(pdf_path, folder, still_ours, budget)
     if status == "done":

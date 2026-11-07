@@ -262,11 +262,14 @@ def _split_label_from_value(word: Word) -> list[Word]:
     ]
 
 
-def _page_lines(page: Page) -> list[list[Word]]:
-    """All readable words on a page as visual lines, skipping charts and pictures."""
+def _page_lines(page: Page, skip_tables: bool = False) -> list[list[Word]]:
+    """All readable words on a page as visual lines, skipping charts and pictures (and tables, if asked)."""
+    skipped = (
+        (RegionType.CHART, RegionType.IMAGE, RegionType.TABLE) if skip_tables else (RegionType.CHART, RegionType.IMAGE)
+    )
     words: list[Word] = list(page.flagged_words)
     for region in page.regions:
-        if region.type not in (RegionType.CHART, RegionType.IMAGE):
+        if region.type not in skipped:
             words.extend(region.words)
     return group_into_lines([part for word in words for part in _split_label_from_value(word)])
 
@@ -475,7 +478,8 @@ def find_vendor(document: ExtractedDocument) -> FieldValue:
         return FieldValue()
     page = document.pages[0]
     heading_boxes = [region.bbox for region in page.regions if region.type is RegionType.HEADING]
-    for line in _page_lines(page):
+    # A table's header row ("Description", "Omschrijving") is never a company name, so tables are left out.
+    for line in _page_lines(page, skip_tables=True):
         if line[0].bbox[1] > page.height / 3:
             break
         first_piece = _split_at_gaps(line)[0]

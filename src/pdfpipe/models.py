@@ -125,12 +125,12 @@ class FieldValue(BaseModel):
     confidence: float = 0.0
     needs_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
-    suggested_value: Any = None  # Claude's answer when it needs a person to confirm it.
+    suggested_value: Any = None  # The language model's answer when it needs a person to confirm it.
     suggested_by: str | None = None
     alternatives: list[Any] = Field(default_factory=list, exclude=True)
     rule_notes: list[str] = Field(default_factory=list, exclude=True)  # Doubts the rules raised in step 13.
     evidence_penalty: float = Field(default=0.0, exclude=True)  # Lowers the score when evidence is indirect.
-    llm_confirmed: bool = False  # Claude read the same value, which settles doubts about the reading only.
+    llm_confirmed: bool = False  # The language model read the same value, which settles doubts about the reading only.
     recovery: str | None = None  # Set when a second pass over the line produced this value.
 
 

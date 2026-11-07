@@ -164,7 +164,7 @@ class TestProviderChoice:
     def test_openai_is_the_default_provider_and_uses_a_cheap_model(self) -> None:
         settings = Settings(_env_file=None)
         assert settings.llm_provider == "openai"
-        assert models_for(settings) == ("gpt-4o-mini", None)
+        assert models_for(settings) == ("gpt-4o-mini", "gpt-5-nano")
 
     def test_it_is_off_unless_turned_on(self) -> None:
         assert build_resolver(Settings(_env_file=None, openai_api_key="x")) is None
@@ -330,11 +330,10 @@ class TestOtherLanguagesAndPhotos:
         }
         client = FakeOpenAI(reply, reply)
         resolver(client).resolve_failed_fields(fields, document, pdf)
-        # The number and the vendor were printed and two models agreed. The date is Dutch, which the parser can't read,
-        # so it is left for a person instead of being guessed.
+        # The number, the vendor and the date were printed and two models agreed. The Dutch month is understood.
         assert fields["invoice_number"].value == "F-2026-77"
         assert fields["vendor_name"].value == "Acme Kantoor BV"
-        assert fields["invoice_date"].value is None
+        assert fields["invoice_date"].value == "2026-03-05"
         assert fields["grand_total"].value == Decimal("110.00")
         assert all(name in fields for name in wanted)
 
