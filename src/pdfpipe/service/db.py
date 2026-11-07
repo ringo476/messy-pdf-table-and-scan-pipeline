@@ -185,6 +185,30 @@ def search_invoices(
     return connection.execute(sql, parameters).fetchall()
 
 
+# Finished and settled. A document that still needs review is never removed, because someone has yet to look at it.
+_SETTLED = ("accepted", "reviewed", "failed")
+
+
+def jobs_older_than(connection: Connection, days: int, only_with_files: bool, limit: int = 200) -> list[uuid.UUID]:
+    """Settled jobs that finished more than this many days ago. Returns the oldest first."""
+    sql = """SELECT id FROM jobs
+             WHERE status = ANY(%s) AND finished_at < now() - make_interval(days => %s)"""
+    if only_with_files:
+        sql += " AND files_deleted_at IS NULL"
+    sql += " ORDER BY finished_at LIMIT %s"
+    return [row["id"] for row in connection.execute(sql, (list(_SETTLED), days, limit)).fetchall()]
+
+
+def mark_files_deleted(connection: Connection, job_ids: list[uuid.UUID]) -> None:
+    connection.execute("UPDATE jobs SET files_deleted_at = now() WHERE id = ANY(%s)", (job_ids,))
+
+
+def delete_jobs(connection: Connection, job_ids: list[uuid.UUID]) -> int:
+    """Removes jobs and, through the foreign keys, their remembered invoice records and their audit rows."""
+    cursor = connection.execute("DELETE FROM jobs WHERE id = ANY(%s) AND status = ANY(%s)", (job_ids, list(_SETTLED)))
+    return cursor.rowcount
+
+
 def finish_with_reused_result(
     connection: Connection, job_id: uuid.UUID, source_id: uuid.UUID, machine: dict[str, Any]
 ) -> None:

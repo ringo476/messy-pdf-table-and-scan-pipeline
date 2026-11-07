@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at  TIMESTAMPTZ
 );
 
+-- Set when the uploaded PDF and its chart images were removed by the retention rule. The result is kept.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS files_deleted_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS jobs_ready ON jobs (run_after, created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS jobs_expired_lease ON jobs (lease_until) WHERE status = 'running';
 CREATE INDEX IF NOT EXISTS jobs_by_user ON jobs (user_id, created_at DESC);

@@ -81,9 +81,13 @@ If the language model is turned on, a question can be typed in plain words, such
 
 These come from generated documents only. **Accuracy on real invoices has not been measured.** The generator can't produce every way that real documents go wrong, so expect real-world results to be worse.
 
-**Standard set**, on 162 freshly generated documents the code had never been run on (1,620 fields, language model off). It was run once.
+**Standard set.** Two runs, each on 162 freshly generated documents the code had never been run on (1,620 fields, language model off). Each was run once.
 
-- **Silent errors (wrong values accepted without review): 1.** One line-item description had lost a space (`Whiteboardmarkers`) in a 54-item scan, while every number was right. I then added a check for words of 16 or more letters run together. That check has not been measured on unseen documents, and it can't catch a short pair such as `Officechair`.
+*Run 2, on the current code (seeds 700 to 702):* 0 silent errors, 99.75% of values correct, 9.2% of fields sent to review, 36 of 36 must-review documents caught, 81 of the 126 with no planted problem accepted with no review, table cell F1 0.968, 1.21 s per page at the median and 5.42 s at the 95th percentile, no crashes. The second pass fixed 5 fields, and none was wrong. It sent 4 wrong or empty fields to review, none silently.
+
+*Run 1, before a check for words run together in item descriptions (seeds 400 to 402). The details of this run follow:*
+
+- **Silent errors (wrong values accepted without review): 1.** One line-item description had lost a space (`Whiteboardmarkers`) in a 54-item scan, while every number was right. I then added a check for words of 16 or more letters run together. Run 2 had none, but that is one clean run, and the check can't catch a short pair such as `Officechair`.
 - Correct values: 99.44%
 - Fields sent to review: 8.27%
 - Table cell F1: 0.972
@@ -102,7 +106,7 @@ These come from generated documents only. **Accuracy on real invoices has not be
 - One name with a dropped space on a scanned credit note was caught by the new check and sent to review.
 - Spanish and Italian labels are only unit-tested. No generated Spanish or Italian documents exist.
 
-Two cautions about these numbers. The first standard set I used (seeds 100 to 102) is no longer a fair test, because I used its failures to fix the date reading, the vendor guess, and the second pass. And each time a check is added after looking at failures, the set it was tuned on stops being unseen. The numbers above are the ones taken before the last fix.
+Two cautions about these numbers. The first standard set I used (seeds 100 to 102) is no longer a fair test, because I used its failures to fix the date reading, the vendor guess, and the second pass. And each time a check is added after looking at failures, the set it was tuned on stops being unseen, so run 1 is no longer an unseen set either. Run 2 is the one to trust, until the next change.
 
 Four users uploading at the same moment (3 workers, 6 cores):
 
@@ -145,12 +149,12 @@ python scripts/load_test.py --db-url postgresql://pdfpipe:PASSWORD@127.0.0.1:543
 - **An amount like `1.234` is left for a person.** It is 1234 in some countries and 1.234 in others, so it isn't guessed. European invoices with whole amounts written like `1.250` therefore go to review.
 - **Thresholds are hand-set.** The 0.85 minimum and the score formula haven't been calibrated against real error rates.
 - **Half of the generated documents still need a person for at least one field.** Some of that is deliberate: 36 of the 162 had planted problems.
-- **Line items can't be edited on the web page.** A person can confirm them or correct the document's other fields.
+- **Line items can be edited, but not yet by looking at the page.** A person can change, add and remove lines on the web page, and the server checks each line and the sums. The page image isn't shown beside the values, so the reviewer opens the PDF separately.
 - **Confirming is one click.** Typed values are checked, but a reviewer can still confirm every flagged field without looking at the page.
 - **Uploading the same file again reuses the old result** even if settings changed in between, such as turning the language model on.
 - **Retries start the whole document again.** Results aren't saved page by page.
 - **Monitoring is basic.** There are logs and a `/health` endpoint, but no dashboard.
-- **There is no backup and no retention rule.** Uploaded files and results stay until a user deletes them.
+- **Backups are manual until you schedule them.** The backup script works, and restoring from it was tested, but nothing runs it for you. Retention is off by default, so files and results stay until a user deletes them. Nothing is encrypted on disk.
 - **Traffic is plain HTTP**, so it's only suitable for one PC or a trusted network.
 - **PDFs that hide scripts or attachments are not cleaned.** Those parts are never run, but they stay in the stored file.
 
@@ -191,6 +195,48 @@ python -m pdfpipe.evaluation.benchmark --out eval_out/model --seeds 3 --first-se
 ```
 
 Claude is still available. Set `PDFPIPE_LLM_PROVIDER=anthropic` and `PDFPIPE_ANTHROPIC_API_KEY`. Only the provider you choose is ever called. Claude's Sonnet requests use Anthropic's server-side refusal fallback.
+
+## Editing line items
+
+On the review page, the line items are a table of boxes. A person can change a description, quantity, unit price or amount, add a line, or remove one. Each edit goes through the same checks as the automatic result:
+
+- Every line needs a description (up to 300 characters) and a clear amount. A quantity and a unit price are optional, but if they are given they must be clear numbers. An amount like `1.234` is refused, because it can't be told apart from 1234.
+- Quantity times unit price must equal the amount on each line.
+- The lines must add up to the subtotal. With no subtotal, the lines plus tax and charges must make the grand total.
+- Credit notes may use negative amounts.
+
+If a person believes the document itself is wrong, they can approve the printed lines instead of editing them. A refused edit changes nothing. An accepted one is saved as the person's version, the original machine result is kept, and the change is recorded in the audit trail with the old and new lines.
+
+## Backups
+
+The backup script writes the database and the uploaded files into a `backups` folder, checks both files by reading them back, and keeps the newest 14. If either half fails, neither is kept, and the script says what went wrong. Run it on the PC where Docker is running, from the project folder:
+
+```bash
+python scripts/backup.py
+```
+
+To keep it on a schedule, run that command from Windows Task Scheduler, for example every night. The backups hold your invoices, so keep the folder on a drive that is itself backed up, and treat it like the data it holds. Nothing in them is encrypted.
+
+To restore into a fresh system, start it, then load the database and the files. This replaces what is there, so do it on an empty system. Replace the names with your backup's:
+
+```bash
+gunzip -c backups/pdfpipe-DATE-database.sql.gz | docker compose exec -T db psql -U pdfpipe -d pdfpipe
+```
+
+```bash
+docker compose exec -T web tar -xzf - -C /data < backups/pdfpipe-DATE-files.tar.gz
+```
+
+The restore of the database part was tested into a scratch database, and every table came back. The files part is a plain archive of the data folder.
+
+## Keeping data for a limited time
+
+By default nothing is ever deleted automatically, because many businesses must keep invoices for years. Two settings in `.env` turn on a retention rule. Both count days from when a document finished processing, and both are off at 0:
+
+- `PDFPIPE_RETENTION_FILES_DAYS`: remove the uploaded PDF and the chart images. The extracted result, the person's corrections, and the audit trail stay.
+- `PDFPIPE_RETENTION_RECORDS_DAYS`: remove everything about the document, including its result, its audit trail, and what the system remembered about the invoice.
+
+A document that still needs review is never removed, however old it is. A worker checks once an hour. Take a backup before turning this on, because removed data can't be recovered.
 
 ## Develop
 

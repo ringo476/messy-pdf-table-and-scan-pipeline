@@ -78,5 +78,12 @@ class Settings(BaseSettings):
     max_active_jobs_per_user: int = 20
     job_timeout_seconds: int = 900
     job_max_attempts: int = 3
+    # Retention. 0 means keep forever, which is the default, because many businesses must keep invoices for years.
+    # A document that is still waiting for review is never removed.
+    # Days after processing to remove the uploaded PDF and chart images. The result is kept.
+    retention_files_days: int = 0
+    # Days after processing to remove everything about a document, including its result and its audit trail.
+    retention_records_days: int = 0
+
     # A worker renews its lease every 5 seconds, so a dead worker's job is picked up again after this long.
     job_lease_seconds: int = 20

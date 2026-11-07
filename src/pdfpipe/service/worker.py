@@ -23,15 +23,13 @@ from ..engines import Engines
 from ..fields.llm import build_resolver
 from ..pipeline.intake import RejectedFile
 from ..process import process_pdf, result_to_dict
-from . import db, history
+from . import db, history, retention
+from .paths import job_dir
 
 logger = logging.getLogger("pdfpipe.worker")
 
 _POLL_SECONDS = 1.0
-
-
-def job_dir(settings: Settings, job_id: uuid.UUID | str) -> Path:
-    return settings.data_dir / "jobs" / str(job_id)
+_RETENTION_SECONDS = 3600.0  # How often a worker looks for documents past their retention limit.
 
 
 def _child_main(pipe: Any, settings: Settings) -> None:
@@ -234,6 +232,7 @@ def main() -> None:
     extractor.start()
     logger.info("worker %s is ready", worker)
     last_recovery = 0.0
+    last_retention = 0.0
 
     try:
         while not stopping["now"]:
@@ -243,6 +242,14 @@ def main() -> None:
                     if recovered:
                         logger.warning("recovered %d jobs from stopped workers", recovered)
                     last_recovery = time.monotonic()
+                if time.monotonic() - last_retention > _RETENTION_SECONDS:
+                    last_retention = time.monotonic()
+                    try:
+                        retention.run_retention(connection, settings)
+                    except psycopg.OperationalError:
+                        raise
+                    except Exception:  # Clearing out old files is never a reason to stop processing documents.
+                        logger.exception("the retention step failed")
                 job = db.claim_next_job(connection, worker, settings.job_lease_seconds)
                 if job is None:
                     time.sleep(_POLL_SECONDS)

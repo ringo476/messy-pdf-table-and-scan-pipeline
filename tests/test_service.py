@@ -326,6 +326,80 @@ class TestReview:
         fields = client.get(f"/api/jobs/{job_id}").json()["result"]["reviewed"]["fields"]
         assert fields["invoice_date"]["value"] == "2026-03-05"
 
+    def job_with_items(self, client: TestClient, connection: db.Connection) -> str:
+        job_id = upload(client).json()["id"]
+        machine = machine_result()
+        machine["fields"]["subtotal"] = {
+            "value": "100.00",
+            "needs_review": False,
+            "confidence": 0.97,
+            "review_reasons": [],
+        }
+        machine["fields"]["grand_total"] = {
+            "value": "100.00",
+            "needs_review": False,
+            "confidence": 0.97,
+            "review_reasons": [],
+        }
+        machine["fields"]["line_items"] = {
+            "value": [{"description": "Pens", "quantity": "2", "unit_price": "20.00", "amount": "40.00"}],
+            "needs_review": True,
+            "confidence": 0.5,
+            "review_reasons": ["the line items add up to 40.00, but the subtotal is 100.00"],
+        }
+        connection.execute("UPDATE jobs SET status = 'running', worker = 'w' WHERE id = %s", (job_id,))
+        db.complete_job(connection, uuid.UUID(job_id), "w", machine)
+        return str(job_id)
+
+    def test_line_items_can_be_edited_and_the_change_is_logged(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        job_id = self.job_with_items(client, connection)
+        lines = [
+            {"description": "Pens", "quantity": "2", "unit_price": "20.00", "amount": "40.00"},
+            {"description": "Paper", "quantity": "3", "unit_price": "20.00", "amount": "60.00"},
+        ]
+        reply = client.post(
+            f"/api/jobs/{job_id}/review",
+            json={"edits": [{"name": "line_items", "value": lines}], "approve": ["grand_total"]},
+        )
+        assert reply.status_code == 200
+        job = client.get(f"/api/jobs/{job_id}").json()
+        reviewed = job["result"]["reviewed"]["fields"]["line_items"]
+        assert [item["description"] for item in reviewed["value"]] == ["Pens", "Paper"]
+        assert reviewed["source"] == "person"
+        assert job["result"]["machine"]["fields"]["line_items"]["value"][0]["description"] == "Pens"
+        assert len(job["result"]["machine"]["fields"]["line_items"]["value"]) == 1  # the original is kept
+        history = [entry for entry in job["history"] if entry["field"] == "line_items"]
+        assert len(history) == 1
+        assert len(history[0]["old_value"]) == 1
+        assert len(history[0]["new_value"]) == 2
+        assert (
+            client.get(f"/api/jobs/{job_id}/result.json").json()["fields"]["line_items"]["value"][1]["amount"]
+            == "60.00"
+        )
+
+    def test_line_items_that_do_not_add_up_are_refused_and_nothing_is_saved(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        client = logged_in(app_client.app, connection, "sam")
+        job_id = self.job_with_items(client, connection)
+        lines = [{"description": "Pens", "quantity": "2", "unit_price": "20.00", "amount": "40.00"}]
+        reply = client.post(f"/api/jobs/{job_id}/review", json={"edits": [{"name": "line_items", "value": lines}]})
+        assert reply.status_code == 422
+        assert "subtotal" in reply.json()["detail"]
+        assert client.get(f"/api/jobs/{job_id}").json()["history"] == []
+
+    def test_a_user_cannot_edit_another_users_line_items(
+        self, app_client: TestClient, connection: db.Connection
+    ) -> None:
+        owner = logged_in(app_client.app, connection, "owner")
+        other = logged_in(app_client.app, connection, "other")
+        job_id = self.job_with_items(owner, connection)
+        reply = other.post(f"/api/jobs/{job_id}/review", json={"edits": [{"name": "line_items", "value": []}]})
+        assert reply.status_code == 404
+
     def test_unknown_field_is_refused(self, app_client: TestClient, connection: db.Connection) -> None:
         client = logged_in(app_client.app, connection, "sam")
         job_id = self.finished_job(client, connection)

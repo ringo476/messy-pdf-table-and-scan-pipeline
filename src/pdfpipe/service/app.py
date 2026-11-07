@@ -28,8 +28,9 @@ from ..fields.readers import AnthropicReader, Reader, build_reader
 from ..fields.values import parse_date, parse_money
 from ..pipeline.intake import RejectedFile
 from . import ask, auth, db
+from .paths import job_dir
 from .safe_intake import inspect_in_process
-from .worker import copy_reused_files, job_dir
+from .worker import copy_reused_files
 
 logger = logging.getLogger("pdfpipe.app")
 
@@ -88,17 +89,63 @@ _DATE_FIELDS = ("invoice_date", "due_date")
 _REQUIRED_FIELDS = ("invoice_number", "invoice_date", "vendor_name", "grand_total")
 
 
+MAX_ITEMS = 500
+MAX_DESCRIPTION_CHARS = 300
+
+
+def _refuse(detail: str) -> HTTPException:
+    return HTTPException(status_code=422, detail=detail)
+
+
+def clean_items(value: Any, credit_note: bool = False) -> list[dict[str, Any]] | None:
+    """Checks a person's edited list of line items and returns it in the stored form (amounts as exact strings).
+
+    Each line needs a description and a clear amount. A quantity and a unit price are optional, but if they are
+    given they must be clear numbers. Returns None if the person cleared the list.
+    """
+    if value in (None, []):
+        return None
+    if not isinstance(value, list):
+        raise _refuse("Line items must be a list of lines.")
+    if len(value) > MAX_ITEMS:
+        raise _refuse(f"There can be at most {MAX_ITEMS} lines.")
+    items: list[dict[str, Any]] = []
+    for number, row in enumerate(value, start=1):
+        if not isinstance(row, dict):
+            raise _refuse(f"Line {number} isn't a valid line.")
+        description = str(row.get("description") or "").strip()
+        if not description or len(description) > MAX_DESCRIPTION_CHARS:
+            raise _refuse(f"Line {number} needs a description of up to {MAX_DESCRIPTION_CHARS} characters.")
+        numbers: dict[str, Decimal | None] = {}
+        for key, required in (("amount", True), ("quantity", False), ("unit_price", False)):
+            text = str(row.get(key) if row.get(key) is not None else "").strip()
+            if not text:
+                if required:
+                    raise _refuse(f"Line {number} needs a clear amount, like 40.00.")
+                numbers[key] = None
+                continue
+            parsed = parse_money(text)
+            if parsed is None or (parsed < 0 and not credit_note):
+                raise _refuse(f"Line {number}: the {key.replace('_', ' ')} must be a clear number like 40.00.")
+            numbers[key] = parsed
+        items.append(
+            {
+                "description": description,
+                **{key: (format(number, "f") if number is not None else None) for key, number in numbers.items()},
+            }
+        )
+    return items
+
+
 def clean_edit(name: str, value: Any, credit_note: bool = False) -> Any:
     """Checks a person's typed value the same way the automatic one was checked, and returns it in the stored form."""
+    if name == "line_items":
+        return clean_items(value, credit_note)
     text = "" if value is None else str(value).strip()
     if not text:
         if name in _REQUIRED_FIELDS:
             raise HTTPException(status_code=422, detail=f"{name} can't be empty.")
         return None
-    if name == "line_items":
-        raise HTTPException(
-            status_code=422, detail="Line items can't be edited here. Approve or correct the other fields."
-        )
     if name in _MONEY_FIELDS:
         amount = parse_money(text)
         # A discount is often printed as a negative, and credit notes print negatives throughout.
@@ -120,12 +167,12 @@ def clean_edit(name: str, value: Any, credit_note: bool = False) -> Any:
 def apply_review(
     machine: dict[str, Any], current: dict[str, Any] | None, request: ReviewRequest, tolerance: float = 0.01
 ) -> tuple[dict[str, Any], list[tuple[str, Any, Any]]]:
-    credit_note = machine.get("document_type") == "credit_note"
     """Applies a person's edits on top of the machine's fields. The machine's output stays unchanged.
 
     Typed values go through the same format and total checks as automatic ones. A person who believes the
     document itself is wrong can approve the printed values instead of editing them.
     """
+    credit_note = machine.get("document_type") == "credit_note"
     fields: dict[str, Any] = copy.deepcopy(current["fields"]) if current else copy.deepcopy(machine["fields"])
     changes: list[tuple[str, Any, Any]] = []
     for edit in request.edits:
@@ -137,6 +184,8 @@ def apply_review(
         field.update(value=cleaned, source="person", needs_review=False, confidence=1.0, review_reasons=[])
     if any(edit.name in _MONEY_FIELDS for edit in request.edits) and not credit_note:
         _check_edited_totals(fields, Decimal(str(tolerance)))
+    if any(edit.name == "line_items" for edit in request.edits):
+        _check_edited_items(fields, Decimal(str(tolerance)), credit_note)
     for name in request.approve:
         if name not in fields:
             raise HTTPException(status_code=422, detail=f"Unknown field: {name}")
@@ -146,10 +195,58 @@ def apply_review(
     return {"fields": fields}, changes
 
 
+def _amount_of(fields: dict[str, Any], name: str) -> Decimal | None:
+    value = fields.get(name, {}).get("value")
+    return parse_money(str(value)) if value not in (None, "") else None
+
+
+def _check_edited_items(fields: dict[str, Any], tolerance: Decimal, credit_note: bool) -> None:
+    """The same arithmetic the pipeline applies: each line, and the lines against the subtotal or the total."""
+    items = fields.get("line_items", {}).get("value") or []
+    if not items:
+        return
+    wrong = []
+    items_sum = Decimal(0)
+    for number, item in enumerate(items, start=1):
+        amount = Decimal(item["amount"])
+        items_sum += amount
+        if item.get("quantity") is not None and item.get("unit_price") is not None:
+            product = Decimal(item["quantity"]) * Decimal(item["unit_price"])
+            difference = abs(abs(product) - abs(amount)) if credit_note else abs(product - amount)
+            if difference > tolerance + Decimal("0.005"):
+                wrong.append(number)
+    if wrong:
+        raise _refuse(
+            f"Quantity times unit price doesn't equal the amount on lines {wrong[:10]}. "
+            "Correct the line, or approve the printed items if the document itself is wrong."
+        )
+    subtotal = _amount_of(fields, "subtotal")
+    if subtotal is not None:
+        if abs(items_sum - subtotal) > tolerance:
+            raise _refuse(
+                f"The lines add up to {items_sum}, but the subtotal is {subtotal}. "
+                "Correct the lines or the subtotal, or approve the printed ones if the document itself is wrong."
+            )
+        return
+    total = _amount_of(fields, "grand_total")
+    if total is not None:
+        candidates = expected_totals(
+            items_sum,
+            *[
+                _amount_of(fields, name)
+                for name in ("tax", "cgst", "sgst", "igst", "shipping", "discount", "rounding", "deposit")
+            ],
+        )
+        if not any(abs(candidate - total) <= tolerance for candidate in candidates):
+            raise _refuse(
+                f"The lines plus tax and other charges come to {candidates[0]}, but the grand total is {total}. "
+                "Correct the lines or the total, or approve the printed ones if the document itself is wrong."
+            )
+
+
 def _check_edited_totals(fields: dict[str, Any], tolerance: Decimal) -> None:
     def amount(name: str) -> Decimal | None:
-        value = fields.get(name, {}).get("value")
-        return parse_money(str(value)) if value not in (None, "") else None
+        return _amount_of(fields, name)
 
     subtotal, total = amount("subtotal"), amount("grand_total")
     if subtotal is None or total is None:

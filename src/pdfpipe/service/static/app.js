@@ -103,7 +103,7 @@ async function uploadFiles(files, message) {
   }
 }
 
-// Searches the person's own accepted and reviewed invoices. The totals are added up by the server, not by Claude.
+// Searches the person's own accepted and reviewed invoices. The totals are added up by the server, not by a language model.
 function searchPanel() {
   const vendor = el("input", { placeholder: "Vendor, for example Acme", "aria-label": "Vendor" });
   const from = el("input", { type: "date", "aria-label": "From date" });
@@ -228,17 +228,48 @@ function displayValue(value) {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-function itemsTable(items) {
-  const header = ["Description", "Qty", "Unit price", "Amount"];
-  return el("div", { class: "scroll" }, el("table", {},
-    el("thead", {}, el("tr", {}, header.map((name, index) => el("th", { class: index ? "num" : null }, name)))),
-    el("tbody", {}, items.map((item) => el("tr", {},
-      el("td", {}, item.description ?? ""),
-      el("td", { class: "num" }, item.quantity ?? ""),
-      el("td", { class: "num" }, item.unit_price ?? ""),
-      el("td", { class: "num" }, item.amount ?? ""),
-    ))),
-  ));
+// An editable list of line items. The server checks every value again, so this only collects what the person typed.
+function itemsEditor(items) {
+  const keys = ["description", "quantity", "unit_price", "amount"];
+  const lines = (items || []).map((item) => ({
+    description: item.description ?? "", quantity: item.quantity ?? "", unit_price: item.unit_price ?? "", amount: item.amount ?? "",
+  }));
+  const original = JSON.stringify(lines);
+  const body = el("tbody");
+
+  function draw() {
+    body.replaceChildren(...lines.map((line, index) => el("tr", {},
+      ...keys.map((key) => el("td", { class: key === "description" ? null : "num" },
+        el("input", {
+          value: line[key],
+          "aria-label": `${key.replace("_", " ")} on line ${index + 1}`,
+          oninput: (event) => { line[key] = event.target.value; },
+        }))),
+      el("td", {}, el("button", {
+        type: "button", "aria-label": `Remove line ${index + 1}`,
+        onclick: () => { lines.splice(index, 1); draw(); },
+      }, "Remove")),
+    )));
+  }
+  draw();
+
+  const header = ["Description", "Qty", "Unit price", "Amount", ""];
+  const node = el("div", {},
+    el("div", { class: "scroll" }, el("table", {},
+      el("thead", {}, el("tr", {}, header.map((name, index) => el("th", { class: index > 0 && index < 4 ? "num" : null }, name)))),
+      body,
+    )),
+    el("button", {
+      type: "button", style: "margin-top:8px",
+      onclick: () => { lines.push({ description: "", quantity: "", unit_price: "", amount: "" }); draw(); },
+    }, "Add line"),
+  );
+  return {
+    node,
+    changed: () => JSON.stringify(lines) !== original,
+    // A line the person left completely empty is not a line.
+    value: () => lines.filter((line) => keys.some((key) => String(line[key]).trim() !== "")).map((line) => ({ ...line })),
+  };
 }
 
 function gridTable(rows) {
@@ -249,14 +280,16 @@ function gridTable(rows) {
 
 function fieldsPanel(job, fields, message) {
   const inputs = {};
+  let itemEditor = null;
   const rows = Object.entries(FIELD_NAMES).map(([name, title]) => {
     const field = fields[name];
     if (!field) return null;
     const isItems = name === "line_items";
-    const value = isItems
-      ? (field.value && field.value.length ? itemsTable(field.value) : el("span", { class: "muted" }, "Not found"))
-      : null;
-    if (!isItems) {
+    let value = null;
+    if (isItems) {
+      itemEditor = itemsEditor(field.value);
+      value = itemEditor.node;
+    } else {
       inputs[name] = el("input", { value: displayValue(field.value), "aria-label": title, placeholder: "Not found" });
     }
     return el("tr", { class: field.needs_review ? "field-review" : null },
@@ -264,14 +297,14 @@ function fieldsPanel(job, fields, message) {
       el("td", {},
         value || inputs[name],
         field.suggested_value !== null && field.suggested_value !== undefined
-          ? el("div", { class: "suggest" }, `Claude suggests: ${displayValue(field.suggested_value)} `,
+          ? el("div", { class: "suggest" }, `The model suggests: ${displayValue(field.suggested_value)} `,
               isItems ? null : el("button", { type: "button", onclick: () => { inputs[name].value = displayValue(field.suggested_value); } }, "Use this"))
           : null,
         (field.review_reasons || []).map((reason) => el("div", { class: "reason" }, reason)),
       ),
       el("td", { class: "small muted hide-narrow" },
         field.page ? `Page ${field.page}` : "",
-        field.source ? el("div", {}, ({ text_layer: "PDF text", ocr: "OCR", mixed: "PDF text and OCR", llm: "Claude", person: "Person" })[field.source] || field.source) : null,
+        field.source ? el("div", {}, ({ text_layer: "PDF text", ocr: "OCR", mixed: "PDF text and OCR", llm: "Language model", person: "Person" })[field.source] || field.source) : null,
       ),
       el("td", { class: "num small" }, field.confidence ? field.confidence.toFixed(2) : ""),
     );
@@ -289,8 +322,12 @@ function fieldsPanel(job, fields, message) {
         approve.push(name);
       }
     }
-    // Line items can't be edited on this page, so saving confirms them as they stand.
-    if (fields.line_items && fields.line_items.needs_review) approve.push("line_items");
+    // Line items are sent only if the person changed them. Otherwise, a flagged list is confirmed as it stands.
+    if (itemEditor && itemEditor.changed()) {
+      edits.push({ name: "line_items", value: itemEditor.value() });
+    } else if (fields.line_items && fields.line_items.needs_review) {
+      approve.push("line_items");
+    }
     try {
       await api(`/api/jobs/${job.id}/review`, {
         method: "POST",
@@ -384,7 +421,7 @@ async function showJob(id) {
     el("h2", {}, "Fields"),
     fieldsPanel(job, fields, message),
     machine.llm && machine.llm.calls
-      ? el("p", { class: "small muted" }, `Claude was used ${machine.llm.calls} times, estimated cost $${machine.llm.estimated_cost_usd.toFixed(4)}.`)
+      ? el("p", { class: "small muted" }, `The language model was used ${machine.llm.calls} times, estimated cost $${machine.llm.estimated_cost_usd.toFixed(4)}.`)
       : null,
     job.history && job.history.length
       ? el("div", {}, el("h2", {}, "Change history"), el("div", { class: "panel small" }, job.history.map((entry) => {

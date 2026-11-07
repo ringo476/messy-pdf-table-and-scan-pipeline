@@ -6,3 +6,4 @@ eval_out
 tests
 **/__pycache__
 *.md
+backups/

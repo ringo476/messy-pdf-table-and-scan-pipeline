@@ -11,7 +11,8 @@ import pytest
 
 from pdfpipe.config import Settings
 from pdfpipe.service import auth, db
-from pdfpipe.service.worker import Extractor, handle_job, job_dir
+from pdfpipe.service.paths import job_dir
+from pdfpipe.service.worker import Extractor, handle_job
 
 
 def slow_child(pipe: Any) -> None:
